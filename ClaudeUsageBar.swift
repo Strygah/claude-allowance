@@ -40,19 +40,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return NSColor(red: r * scale, green: g * scale, blue: 0, alpha: 1)
     }
 
+    // Reads OAuth token from a plain file maintained by Claude Code hooks
+    // (~/.claude/usage-bar/refresh-token.sh on SessionStart;
+    // update-rate-limits.sh refreshes on 401). Avoids macOS keychain
+    // prompts on ad-hoc signed apps.
     func getOAuthToken() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String else {
+        let path = NSString(string: "~/.claude/usage-bar/api-token").expandingTildeInPath
+        guard let token = try? String(contentsOfFile: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
             return nil
         }
         return token
@@ -67,8 +63,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
-        request.setValue(token, forHTTPHeaderField: "x-api-key")
+        // OAuth subscription tokens require Bearer auth + oauth beta header.
+        // x-api-key is for API keys only and will return 401 for sk-ant-oat-* tokens.
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": "claude-haiku-4-5-20251001",

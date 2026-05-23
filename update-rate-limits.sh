@@ -18,11 +18,13 @@ fi
 TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
 [[ -z "$TOKEN" ]] && exit 0
 
-# One cheap API call — we only care about response headers
+# One cheap API call — we only care about response headers.
+# OAuth subscription tokens (sk-ant-oat-*) need Bearer auth + the oauth-* beta header.
 HEADERS=$(curl -s -D - -o /dev/null -m 5 \
     -X POST https://api.anthropic.com/v1/messages \
-    -H "x-api-key: $TOKEN" \
+    -H "Authorization: Bearer $TOKEN" \
     -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: oauth-2025-04-20" \
     -H "content-type: application/json" \
     -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' \
     2>/dev/null)
@@ -35,8 +37,9 @@ if echo "$HEADERS" | grep -q "HTTP.*401"; then
         echo -n "$NEW_TOKEN" > "$TOKEN_FILE"
         HEADERS=$(curl -s -D - -o /dev/null -m 5 \
             -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $NEW_TOKEN" \
+            -H "Authorization: Bearer $NEW_TOKEN" \
             -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: oauth-2025-04-20" \
             -H "content-type: application/json" \
             -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' \
             2>/dev/null)
