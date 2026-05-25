@@ -87,6 +87,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard let http = response as? HTTPURLResponse else {
                 self.fetchError = "Bad response"
+                self.fiveHour = nil; self.sevenDay = nil
+                return
+            }
+
+            // Anything non-200 means we cannot trust the headers. Blank values
+            // so the menu shows "--" instead of silently displaying stale
+            // numbers (the API returns no ratelimit headers on 401, etc).
+            guard http.statusCode == 200 else {
+                self.fetchError = "HTTP \(http.statusCode)"
+                self.fiveHour = nil; self.sevenDay = nil
+                self.fiveHourReset = nil; self.sevenDayReset = nil
                 return
             }
 
