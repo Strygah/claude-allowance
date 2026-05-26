@@ -126,15 +126,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         updateTitle(fiveHour, sevenDay)
 
-        // Also write to file for statusline compat
-        let cache: [String: Any] = [
-            "five_hour": fiveHour as Any,
-            "seven_day": sevenDay as Any,
-            "timestamp": Date().timeIntervalSince1970
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: cache) {
-            let path = NSString(string: "~/.claude/rate-limits.json").expandingTildeInPath
-            try? data.write(to: URL(fileURLWithPath: path))
+        // Write cache only on successful fetch. update-rate-limits.sh uses
+        // this file's mtime as a 30s throttle to decide whether to re-fetch;
+        // writing on every Swift call (including 401s with null values) would
+        // poison that throttle and prevent the script from running its
+        // keychain-refresh fallback when the api-token goes stale.
+        if fetchError == nil, fiveHour != nil || sevenDay != nil {
+            let cache: [String: Any] = [
+                "five_hour": fiveHour as Any,
+                "seven_day": sevenDay as Any,
+                "timestamp": Date().timeIntervalSince1970
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: cache) {
+                let path = NSString(string: "~/.claude/rate-limits.json").expandingTildeInPath
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
         }
     }
 
