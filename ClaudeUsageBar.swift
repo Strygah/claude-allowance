@@ -1,7 +1,7 @@
 import Cocoa
 import Foundation
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var fiveHour: Double?
     var sevenDay: Double?
@@ -24,12 +24,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         readCache()
         buildMenu()
 
-        // Re-read cache every 30s. update-rate-limits.sh (PostToolUse +
+        // Re-read cache every 10s. update-rate-limits.sh (PostToolUse +
         // SessionStart hooks) is the sole writer; this app just renders.
-        Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        // Schedule on .common modes so the timer keeps firing during menu
+        // tracking and other UI run-loop modes — Timer.scheduledTimer's
+        // default mode lets App Nap suspend ticks during long idle.
+        let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.readCache()
             self?.buildMenu()
         }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    // NSMenuDelegate: re-read the cache every time the user opens the menu,
+    // so they always see fresh data the instant they look — independent of
+    // whatever the background Timer is doing.
+    func menuWillOpen(_ menu: NSMenu) {
+        readCache()
+        buildMenu()
     }
 
     func readCache() {
@@ -120,6 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildMenu() {
         let menu = NSMenu()
+        menu.delegate = self
 
         let fhStr = fiveHour.map { String(format: "%.1f%%", $0) } ?? "N/A"
         let fhItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
