@@ -1,110 +1,119 @@
-# UsageLeftBar
+# ClaudeUsageBar
 
-macOS menu bar app showing Claude API rate limit utilization (5-hour session + 7-day weekly) with green→yellow→red gradient.
+macOS menu bar app showing Claude API rate limit utilization (5-hour
+session + 7-day weekly) with green→yellow→red gradient.
 
-## Status: Working prototype (personal use)
+Repo: github.com/Strygah/claude-usage-bar (private)
+Install location: `~/.claude/usage-bar/`
 
-Built 2026-04-02 in a single Claude Code session. Works, but the menu bar app category is saturated (10+ competitors). The real opportunity is a **Chrome extension + anonymized usage data product**.
+## Architecture
 
-## How it works
+Three pieces:
 
-1. Reads OAuth token from macOS Keychain (`Claude Code-credentials` entry)
-2. Makes a minimal Haiku API call every 60s (1 output token)
-3. Parses `anthropic-ratelimit-unified-*` response headers for live utilization %
-4. Displays `XX|YY` in menu bar (5h|7d) with color gradient
-5. Click → dropdown with details, reset timers, link to usage page
+| Piece | When it runs | What it does |
+|-------|--------------|--------------|
+| `refresh-token.sh` | Claude Code `SessionStart` hook | Reads `claudeAiOauth.accessToken` from the `Claude Code-credentials` keychain item, writes it to `~/.claude/usage-bar/api-token`. Silent because the hook runs inside Claude Code's process tree, where macOS treats Claude Code (the keychain item's creator) as implicitly trusted. |
+| `update-rate-limits.sh` | Claude Code `SessionStart` + `PostToolUse` hooks | Reads `api-token`, hits `POST /v1/messages` with `max_tokens:1`, parses the `anthropic-ratelimit-unified-*` response headers, writes `~/.claude/rate-limits.json`. Self-throttles to 30s. On 401, refreshes the api-token from keychain and retries once. |
+| `ClaudeUsageBar.swift` | All the time (menu bar app) | Reads `~/.claude/rate-limits.json` every 30s, renders the menu bar text and dropdown. No network calls, no keychain access. |
+
+Why split this way: macOS Sequoia/Tahoe periodically re-attests
+ad-hoc-signed apps that read OAuth-class keychain items, prompting the
+user for their login password several times a day. Moving keychain
+access into Claude Code's process tree (via hooks) avoids the prompts
+entirely. The app process never touches the keychain.
+
+## Auth: OAuth tokens need Bearer, not x-api-key
+
+The Anthropic API rejects `sk-ant-oat-*` OAuth tokens passed via
+`x-api-key` (silent HTTP 401, no ratelimit headers). The correct
+pattern for subscription OAuth tokens is:
+
+```
+Authorization: Bearer <sk-ant-oat-...>
+anthropic-version: 2023-06-01
+anthropic-beta: oauth-2025-04-20
+```
+
+`x-api-key` is only valid for actual API keys (`sk-ant-api03-*`).
 
 ## Key technical discovery
 
-Rate limit data is ONLY available via successful API response headers:
+Rate-limit data is ONLY available via successful API response headers:
 ```
-anthropic-ratelimit-unified-5h-utilization: 0.54
-anthropic-ratelimit-unified-7d-utilization: 0.40
-anthropic-ratelimit-unified-5h-reset: 1775145600
-anthropic-ratelimit-unified-7d-reset: 1775469600
+anthropic-ratelimit-unified-5h-utilization: 0.43
+anthropic-ratelimit-unified-7d-utilization: 0.56
+anthropic-ratelimit-unified-5h-reset: 1779571800
+anthropic-ratelimit-unified-7d-reset: 1779883200
 ```
-- Error responses (400, 401) do NOT return these headers
-- `count_tokens` endpoint doesn't accept OAuth tokens
-- Minimum cost: 1 Haiku token per poll (~$0.00/day)
+
+- 200 + 429 both return these headers (429 reports 100%)
+- 401 returns nothing useful
+- The minimum-cost ping is 1 Haiku output token (~$0.0001/poll)
+
+## Build & install
+
+```bash
+# 1. Clone into the install location
+git clone git@github.com:Strygah/claude-usage-bar.git ~/.claude/usage-bar
+cd ~/.claude/usage-bar
+
+# 2. Add hooks to ~/.claude/settings.json (merge with any existing hooks):
+#   "hooks": {
+#     "SessionStart": [{
+#       "hooks": [{
+#         "type": "command",
+#         "command": "~/.claude/usage-bar/refresh-token.sh && ~/.claude/usage-bar/update-rate-limits.sh &"
+#       }]
+#     }],
+#     "PostToolUse": [{
+#       "hooks": [{
+#         "type": "command",
+#         "command": "~/.claude/usage-bar/update-rate-limits.sh &"
+#       }]
+#     }]
+#   }
+
+# 3. Bootstrap the token + cache (one-time, run from inside a CC session
+# so security CLI is silent):
+~/.claude/usage-bar/refresh-token.sh
+~/.claude/usage-bar/update-rate-limits.sh
+
+# 4. Build and launch
+./build.sh
+open ./ClaudeUsageBar.app
+```
+
+Requires: Xcode CLI tools (`swift`), macOS 13+, Claude Code logged in.
+
+## How the menu reads
+
+| Display | Meaning |
+|---------|---------|
+| `42\|18` vivid | Fresh data — 5h=42%, 7d=18% |
+| `42\|18` dimmed | Cache is stale (>5 min old, no recent CC activity) — values still informative but possibly out of date |
+| `--\|--` | No cache file. Run any CC command, or the bootstrap scripts above. |
+
+Click the menu to see exact percentages, reset times, and the timestamp
+of the last cache write.
 
 ## Files
 
-- `ClaudeUsageBar.swift` — single-file native Swift menu bar app (~180 lines)
-- `build.sh` — compiles to `.app` bundle with Info.plist (LSUIElement=true for no dock icon)
-- Compiled app lives at `~/.claude/usage-bar/ClaudeUsageBar.app`
-- Also writes `~/.claude/rate-limits.json` as cache
+- `ClaudeUsageBar.swift` — single-file Swift menu bar app. Pure UI; no
+  auth, no network. Reads only `~/.claude/rate-limits.json`.
+- `build.sh` — compiles to `.app` bundle with Info.plist
+  (LSUIElement=true → no dock icon). Ad-hoc signed with stable identifier
+  `com.claude.usage-bar`.
+- `refresh-token.sh` — extracts OAuth access token from keychain into
+  `~/.claude/usage-bar/api-token` (mode 600).
+- `update-rate-limits.sh` — fetches and caches ratelimit headers in
+  `~/.claude/rate-limits.json`.
 
-## Build & run
+## Known limits
 
-```bash
-bash build.sh
-open ~/.claude/usage-bar/ClaudeUsageBar.app
-```
-
-Requires: Xcode CLI tools (swift compiler), macOS 13+, Claude Code logged in (for keychain token).
-
-## Known issues
-
-- Keychain popup on first launch (app reads Claude Code's credential entry — unsigned app triggers macOS security dialog)
-- Only works for Claude Code users (needs the OAuth token in keychain)
-- Browser-only claude.ai users have no way to use this
-
-## Competitive landscape (as of 2026-04-02)
-
-### Menu bar apps (saturated)
-| App | GitHub Stars |
-|-----|-------------|
-| Claude-Code-Usage-Monitor | 7,296 |
-| Claude-Usage-Tracker | 1,886 |
-| Tokscale | 1,512 |
-| ClaudeBar | 869 |
-| ccseva | 790 |
-| CUStats, SessionWatcher | Paid apps |
-
-### Browser extensions for Claude.ai usage: ZERO (gap)
-
-### Anonymized consumer usage data products: NONE (gap)
-- OpenRouter State of AI report covers API/router traffic only
-- Tokscale has a leaderboard but shallow (just totals)
-- Nobody collects: limit-hitting patterns, model switching behavior, tokens-per-session, cache hit ratios, usage by plan tier
-
-## Product direction (not built yet)
-
-The real opportunity is NOT another menu bar app. It's:
-
-1. **Chrome extension for claude.ai** — zero competitors, zero API cost (intercepts existing request headers), works for all users (not just Claude Code)
-2. **Opt-in anonymized telemetry** — collect usage patterns from extension users
-3. **"State of Claude Usage" dataset** — aggregated analytics on how consumers use Claude, valuable to Anthropic (pricing), enterprises (capacity planning), developers (benchmarking)
-
-### Telemetry payload design (opt-in)
-```json
-{
-  "ts": 1775124000,
-  "5h_pct": 54.0,
-  "7d_pct": 40.0,
-  "plan": "max_5x",
-  "model": "claude-opus-4-6",
-  "input_tokens": 1234,
-  "output_tokens": 567,
-  "cache_read_tokens": 890,
-  "client": "browser_ext"
-}
-```
-
-### Derivable insights
-- Usage patterns by time of day / day of week
-- Limit-hitting frequency by plan tier
-- Model preference distribution
-- Token consumption curves
-- Cache effectiveness across real users
-- "Effective capacity" benchmarks per plan
-- Model switching behavior near limits
-
-## Auth options for public distribution
-
-| Approach | UX | Works for |
-|----------|-----|-----------|
-| Piggyback Claude Code keychain | Zero setup, but keychain popup | Claude Code users |
-| Paste API key | 10 seconds | API users |
-| OAuth browser flow | Click login → authorize | Everyone with claude.ai account |
-| Browser extension (no auth needed) | Zero setup | Browser users |
+- Menu data only updates while Claude Code is active (hook-driven). During
+  long idle periods, the menu shows stale-but-dimmed values plus a
+  `(stale)` label in the "updated" line. Self-heals on next CC interaction.
+- The `api-token` file lives in plaintext under `~/.claude/usage-bar/`,
+  mode 600. Same blast radius as your shell history. Gitignored.
+- Ad-hoc signed — fresh macOS install may need to allow first launch via
+  System Settings → Privacy & Security if Gatekeeper complains.

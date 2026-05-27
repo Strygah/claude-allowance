@@ -8,20 +8,9 @@ echo "Building ClaudeUsageBar..."
 mkdir -p "$APP_DIR"
 mkdir -p "$DIR/ClaudeUsageBar.app/Contents"
 
-# Compile, then re-sign with a deterministic ad-hoc identity so the cdhash
-# stays stable across rebuilds (identical source → identical binary →
-# identical cdhash → no Keychain re-prompt). To intentionally force a new
-# cdhash (e.g. after a broken Keychain trust entry needs busting), add
-# `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __build_id -Xlinker <file>`
-# with unique file contents.
-swiftc -O -o "$APP_DIR/ClaudeUsageBar" "$DIR/ClaudeUsageBar.swift" \
-    -framework Cocoa
-
-codesign --force --deep --sign - \
-    --identifier com.claude.usage-bar \
-    "$DIR/ClaudeUsageBar.app"
-
-# Info.plist (hide from dock, mark as agent)
+# Info.plist must exist BEFORE codesign — codesign hashes bundle resources
+# at signing time. Writing it after produces an invalid bundle signature
+# (the on-disk plist won't match the sealed resource manifest).
 cat > "$DIR/ClaudeUsageBar.app/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,6 +29,19 @@ cat > "$DIR/ClaudeUsageBar.app/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Compile.
+swiftc -O -o "$APP_DIR/ClaudeUsageBar" "$DIR/ClaudeUsageBar.swift" \
+    -framework Cocoa
+
+# Re-sign with a deterministic ad-hoc identity so the cdhash stays stable
+# across rebuilds (identical source → identical binary → identical cdhash).
+# To intentionally force a new cdhash (e.g. after a broken Keychain trust
+# entry needs busting), add `-Xlinker -sectcreate -Xlinker __TEXT
+# -Xlinker __build_id -Xlinker <file>` with unique file contents.
+codesign --force --deep --sign - \
+    --identifier com.claude.usage-bar \
+    "$DIR/ClaudeUsageBar.app"
 
 echo "Built: $DIR/ClaudeUsageBar.app"
 echo ""
