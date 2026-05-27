@@ -91,17 +91,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            // Anything non-200 means we cannot trust the headers. Blank values
-            // so the menu shows "--" instead of silently displaying stale
-            // numbers (the API returns no ratelimit headers on 401, etc).
-            guard http.statusCode == 200 else {
+            // 429 (rate-limit exhausted) still returns valid ratelimit headers —
+            // they're the whole point of showing "you're at 100%" in the menu.
+            // Treat 200 and 429 as data-bearing; everything else (401 auth,
+            // 5xx server) blanks values to avoid lying with stale numbers.
+            let hasData = (http.statusCode == 200 || http.statusCode == 429)
+            guard hasData else {
                 self.fetchError = "HTTP \(http.statusCode)"
                 self.fiveHour = nil; self.sevenDay = nil
                 self.fiveHourReset = nil; self.sevenDayReset = nil
                 return
             }
 
-            self.fetchError = nil
+            self.fetchError = (http.statusCode == 429) ? "Rate limited" : nil
             self.lastUpdate = Date()
 
             if let fh = http.value(forHTTPHeaderField: "anthropic-ratelimit-unified-5h-utilization"),
@@ -126,12 +128,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         updateTitle(fiveHour, sevenDay)
 
-        // Write cache only on successful fetch. update-rate-limits.sh uses
-        // this file's mtime as a 30s throttle to decide whether to re-fetch;
-        // writing on every Swift call (including 401s with null values) would
-        // poison that throttle and prevent the script from running its
-        // keychain-refresh fallback when the api-token goes stale.
-        if fetchError == nil, fiveHour != nil || sevenDay != nil {
+        // Write cache only when we actually have data. update-rate-limits.sh
+        // uses this file's mtime as a 30s throttle to decide whether to
+        // re-fetch; writing nulls on every 401 would poison that throttle
+        // and block the script's keychain-refresh fallback. 429 still has
+        // valid headers (utilization at 100%) so it does write.
+        if fiveHour != nil || sevenDay != nil {
             let cache: [String: Any] = [
                 "five_hour": fiveHour as Any,
                 "seven_day": sevenDay as Any,
