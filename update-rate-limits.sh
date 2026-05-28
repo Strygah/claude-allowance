@@ -1,25 +1,29 @@
 #!/bin/bash
-# Lightweight rate-limit updater — called by Claude Code SessionStart +
-# PostToolUse hooks. Makes a cheap Haiku call to read the ratelimit
-# headers and writes JSON cache that ClaudeUsageBar.app reads.
+# Rate-limit updater. Run by a LaunchAgent every 60s (independent of Claude
+# Code activity). Reads the OAuth token, makes a cheap Haiku call to read the
+# ratelimit headers, writes JSON cache that ClaudeUsageBar.app renders.
+#
+# Self-bootstrapping: pulls the token from the Claude Code keychain item when
+# the api-token file is missing or returns 401. `security` reads the keychain
+# silently from any context (it's Apple-signed and in the item's ACL), so this
+# works fine from launchd without a password prompt.
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 CACHE="$HOME/.claude/rate-limits.json"
 TOKEN_FILE="$HOME/.claude/usage-bar/api-token"
 MODEL="claude-haiku-4-5-20251001"
 
-# Skip if updated <30s ago (avoid hammering on rapid tool calls)
-if [[ -f "$CACHE" ]]; then
-    now=$(date +%s)
-    mod=$(stat -f %m "$CACHE" 2>/dev/null || echo 0)
-    if (( now - mod < 30 )); then
-        exit 0
-    fi
-fi
-
-# Read token from file (kept fresh by refresh-token.sh on SessionStart;
-# this script refreshes it on 401).
-TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
-[[ -z "$TOKEN" ]] && exit 0
+# Pull access token from keychain → api-token file. Silent from any context.
+refresh_token_from_keychain() {
+    local t
+    t=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | \
+        /usr/bin/python3 -c "import sys,json; print(json.loads(sys.stdin.read())['claudeAiOauth']['accessToken'])" 2>/dev/null)
+    [[ -z "$t" ]] && return 1
+    printf '%s' "$t" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    printf '%s' "$t"
+}
 
 # OAuth subscription tokens (sk-ant-oat-*) need Bearer auth +
 # anthropic-beta: oauth-2025-04-20. x-api-key returns silent 401.
@@ -35,16 +39,18 @@ fetch_headers() {
         2>/dev/null
 }
 
+# Read token; bootstrap from keychain if the file is empty/missing.
+TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
+if [[ -z "$TOKEN" ]]; then
+    TOKEN=$(refresh_token_from_keychain) || exit 0
+fi
+
 HEADERS=$(fetch_headers "$TOKEN")
 
-# On 401, refresh the file from keychain (silent here — we're in Claude Code's
-# process tree which is the keychain item's creator) and retry once.
+# On 401, refresh the token from keychain and retry once.
 if echo "$HEADERS" | grep -q "HTTP.*401"; then
-    NEW_TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | \
-        /usr/bin/python3 -c "import sys,json; print(json.loads(sys.stdin.read())['claudeAiOauth']['accessToken'])" 2>/dev/null)
+    NEW_TOKEN=$(refresh_token_from_keychain) || exit 0
     if [[ -n "$NEW_TOKEN" && "$NEW_TOKEN" != "$TOKEN" ]]; then
-        printf '%s' "$NEW_TOKEN" > "$TOKEN_FILE"
-        chmod 600 "$TOKEN_FILE"
         HEADERS=$(fetch_headers "$NEW_TOKEN")
     fi
 fi

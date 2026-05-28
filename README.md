@@ -8,19 +8,26 @@ Install location: `~/.claude/usage-bar/`
 
 ## Architecture
 
-Three pieces:
+Two pieces plus a LaunchAgent:
 
 | Piece | When it runs | What it does |
 |-------|--------------|--------------|
-| `refresh-token.sh` | Claude Code `SessionStart` hook | Reads `claudeAiOauth.accessToken` from the `Claude Code-credentials` keychain item, writes it to `~/.claude/usage-bar/api-token`. Silent because the hook runs inside Claude Code's process tree, where macOS treats Claude Code (the keychain item's creator) as implicitly trusted. |
-| `update-rate-limits.sh` | Claude Code `SessionStart` + `PostToolUse` hooks | Reads `api-token`, hits `POST /v1/messages` with `max_tokens:1`, parses the `anthropic-ratelimit-unified-*` response headers, writes `~/.claude/rate-limits.json`. Self-throttles to 30s. On 401, refreshes the api-token from keychain and retries once. |
-| `ClaudeUsageBar.swift` | All the time (menu bar app) | Reads `~/.claude/rate-limits.json` every 30s, renders the menu bar text and dropdown. No network calls, no keychain access. |
+| `update-rate-limits.sh` | LaunchAgent, every 60s | Reads the OAuth token (`api-token` file, bootstrapped from keychain), hits `POST /v1/messages` with `max_tokens:1`, parses the `anthropic-ratelimit-unified-*` response headers, writes `~/.claude/rate-limits.json`. Self-bootstrapping: pulls a fresh token from the `Claude Code-credentials` keychain item whenever the file is missing or returns 401. |
+| `com.claude.usage-bar.plist` | `~/Library/LaunchAgents/` | Runs the updater every 60s regardless of whether Claude Code is active. This is what keeps the data fresh during idle periods. |
+| `ClaudeUsageBar.swift` | All the time (menu bar app) | Reads `~/.claude/rate-limits.json` every 10s and on every menu open. Renders the menu bar text + dropdown. No network calls, no keychain access. |
 
-Why split this way: macOS Sequoia/Tahoe periodically re-attests
-ad-hoc-signed apps that read OAuth-class keychain items, prompting the
-user for their login password several times a day. Moving keychain
-access into Claude Code's process tree (via hooks) avoids the prompts
-entirely. The app process never touches the keychain.
+### Why this shape
+
+macOS Sequoia/Tahoe periodically re-attests ad-hoc-signed apps that read
+OAuth-class keychain items, prompting for the login password several times
+a day. The fix: the menu bar app never touches the keychain. All keychain
+access goes through `/usr/bin/security` (Apple-signed, trusted in the
+item's ACL) inside the updater script — which reads the keychain silently
+from any context, including a background LaunchAgent.
+
+Earlier versions used Claude Code `SessionStart` + `PostToolUse` hooks to
+drive the refresh, but that only updated during CC activity, leaving the
+menu stale during idle. The LaunchAgent removes the CC dependency entirely.
 
 ## Auth: OAuth tokens need Bearer, not x-api-key
 
@@ -38,7 +45,7 @@ anthropic-beta: oauth-2025-04-20
 
 ## Key technical discovery
 
-Rate-limit data is ONLY available via successful API response headers:
+Rate-limit data is ONLY available via API response headers:
 ```
 anthropic-ratelimit-unified-5h-utilization: 0.43
 anthropic-ratelimit-unified-7d-utilization: 0.56
@@ -48,7 +55,9 @@ anthropic-ratelimit-unified-7d-reset: 1779883200
 
 - 200 + 429 both return these headers (429 reports 100%)
 - 401 returns nothing useful
-- The minimum-cost ping is 1 Haiku output token (~$0.0001/poll)
+- The minimum-cost ping is 1 Haiku output token. NB: it's an OAuth
+  subscription call, so it counts a sliver against the very rate limit
+  it measures — negligible at `max_tokens:1` / 60s, but real.
 
 ## Build & install
 
@@ -57,44 +66,35 @@ anthropic-ratelimit-unified-7d-reset: 1779883200
 git clone git@github.com:Strygah/claude-usage-bar.git ~/.claude/usage-bar
 cd ~/.claude/usage-bar
 
-# 2. Add hooks to ~/.claude/settings.json (merge with any existing hooks):
-#   "hooks": {
-#     "SessionStart": [{
-#       "hooks": [{
-#         "type": "command",
-#         "command": "~/.claude/usage-bar/refresh-token.sh && ~/.claude/usage-bar/update-rate-limits.sh &"
-#       }]
-#     }],
-#     "PostToolUse": [{
-#       "hooks": [{
-#         "type": "command",
-#         "command": "~/.claude/usage-bar/update-rate-limits.sh &"
-#       }]
-#     }]
-#   }
+# 2. Install + load the LaunchAgent (refreshes the cache every 60s)
+cp com.claude.usage-bar.plist ~/Library/LaunchAgents/
+#   edit the hardcoded /Users/<you> path in the plist if not strygah
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude.usage-bar.plist
 
-# 3. Bootstrap the token + cache (one-time, run from inside a CC session
-# so security CLI is silent):
-~/.claude/usage-bar/refresh-token.sh
-~/.claude/usage-bar/update-rate-limits.sh
-
-# 4. Build and launch
+# 3. Build and launch the menu bar app
 ./build.sh
 open ./ClaudeUsageBar.app
 ```
 
-Requires: Xcode CLI tools (`swift`), macOS 13+, Claude Code logged in.
+Requires: Xcode CLI tools (`swift`), macOS 13+, Claude Code logged in
+(for the keychain OAuth token).
+
+To stop/remove the agent:
+```bash
+launchctl bootout gui/$(id -u)/com.claude.usage-bar
+```
 
 ## How the menu reads
 
 | Display | Meaning |
 |---------|---------|
 | `42\|18` vivid | Fresh data — 5h=42%, 7d=18% |
-| `42\|18` dimmed | Cache is stale (>5 min old, no recent CC activity) — values still informative but possibly out of date |
-| `--\|--` | No cache file. Run any CC command, or the bootstrap scripts above. |
+| `42\|18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
+| `--\|--` | No cache file. Run `update-rate-limits.sh` manually, or check the LaunchAgent loaded. |
 
 Click the menu to see exact percentages, reset times, and the timestamp
-of the last cache write.
+of the last cache write. The menu re-reads the cache on open, so it's
+always current the moment you look.
 
 ## Files
 
@@ -103,17 +103,17 @@ of the last cache write.
 - `build.sh` — compiles to `.app` bundle with Info.plist
   (LSUIElement=true → no dock icon). Ad-hoc signed with stable identifier
   `com.claude.usage-bar`.
-- `refresh-token.sh` — extracts OAuth access token from keychain into
-  `~/.claude/usage-bar/api-token` (mode 600).
-- `update-rate-limits.sh` — fetches and caches ratelimit headers in
-  `~/.claude/rate-limits.json`.
+- `update-rate-limits.sh` — fetches and caches ratelimit headers; pulls the
+  OAuth token from keychain as needed.
+- `com.claude.usage-bar.plist` — LaunchAgent that runs the updater every 60s.
 
 ## Known limits
 
-- Menu data only updates while Claude Code is active (hook-driven). During
-  long idle periods, the menu shows stale-but-dimmed values plus a
-  `(stale)` label in the "updated" line. Self-heals on next CC interaction.
 - The `api-token` file lives in plaintext under `~/.claude/usage-bar/`,
   mode 600. Same blast radius as your shell history. Gitignored.
+- If Claude Code logs out / the keychain item disappears, the updater can't
+  get a token and the menu shows `--`. Log back into CC.
 - Ad-hoc signed — fresh macOS install may need to allow first launch via
   System Settings → Privacy & Security if Gatekeeper complains.
+- The LaunchAgent path in the plist is hardcoded to an absolute home dir.
+  Edit it on a different machine/user.
