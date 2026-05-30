@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastUpdate: Date?
 
     let cacheFile = NSString(string: "~/.claude/rate-limits.json").expandingTildeInPath
+    let updaterScript = NSString(string: "~/.claude/usage-bar/update-rate-limits.sh").expandingTildeInPath
     let stalenessThreshold: TimeInterval = 300 // 5 minutes
 
     lazy var clockFormatter: DateFormatter = {
@@ -34,14 +35,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.buildMenu()
         }
         RunLoop.main.add(timer, forMode: .common)
+
+        // The LaunchAgent's StartInterval timer is suspended while the Mac
+        // sleeps, so the cache is stale right after wake until the next 60s
+        // tick. Trigger an immediate refresh on wake to close that gap.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil)
     }
 
-    // NSMenuDelegate: re-read the cache every time the user opens the menu,
-    // so they always see fresh data the instant they look — independent of
-    // whatever the background Timer is doing.
+    @objc func systemDidWake() {
+        runUpdater()
+    }
+
+    // Spawn update-rate-limits.sh. Keychain access inside it goes through
+    // /usr/bin/security (Apple-signed, trusted in the item's ACL), so it
+    // stays silent even though this parent app is only ad-hoc signed — the
+    // keychain call is attributed to security, not to us.
+    func runUpdater() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = [updaterScript]
+        task.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.readCache()
+                self?.buildMenu()
+            }
+        }
+        try? task.run()
+    }
+
+    // NSMenuDelegate: re-read the cache every time the user opens the menu so
+    // the values are current the instant they look. If the cache is stale
+    // (e.g. just woke up), also kick the updater so it self-heals while the
+    // menu is open.
     func menuWillOpen(_ menu: NSMenu) {
         readCache()
         buildMenu()
+        if isStale { runUpdater() }
     }
 
     func readCache() {
