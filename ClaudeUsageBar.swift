@@ -11,7 +11,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     let cacheFile = NSString(string: "~/.claude/rate-limits.json").expandingTildeInPath
     let updaterScript = NSString(string: "~/.claude/usage-bar/update-rate-limits.sh").expandingTildeInPath
-    let stalenessThreshold: TimeInterval = 300 // 5 minutes
+    let stalenessThreshold: TimeInterval = 300 // 5 min — when to dim + label "(stale)"
+    let refreshInterval: TimeInterval = 45     // trigger a fetch once the cache is older than this
+    var updaterRunning = false                 // guard against overlapping spawns
 
     lazy var clockFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -25,25 +27,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         readCache()
         buildMenu()
 
-        // Re-read cache every 10s. update-rate-limits.sh (PostToolUse +
-        // SessionStart hooks) is the sole writer; this app just renders.
-        // Schedule on .common modes so the timer keeps firing during menu
-        // tracking and other UI run-loop modes — Timer.scheduledTimer's
-        // default mode lets App Nap suspend ticks during long idle.
-        let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
-            self?.readCache()
-            self?.buildMenu()
+        // The app is the active poller. Every 15s: re-read the cache, and if
+        // it's older than refreshInterval, spawn the updater to fetch fresh
+        // data. This does NOT rely on the LaunchAgent's StartInterval or on
+        // wake notifications — both are suppressed on Macs that sleep often
+        // (StartInterval doesn't fire while asleep; wake events miss DarkWake
+        // and display-only sleep). A run-loop timer instead simply resumes
+        // ticking the moment the process is scheduled again after wake, so as
+        // long as the app is running and the Mac is awake, data stays fresh.
+        // Scheduled on .common modes so it keeps firing during menu tracking.
+        let timer = Timer(timeInterval: 15.0, repeats: true) { [weak self] _ in
+            self?.tick()
         }
         RunLoop.main.add(timer, forMode: .common)
+        tick()
 
-        // The LaunchAgent's StartInterval timer is suspended while the Mac
-        // sleeps, so the cache is stale right after wake until the next 60s
-        // tick. Trigger an immediate refresh on wake to close that gap.
+        // Extra nudge on wake when it does fire — harmless, just faster.
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(systemDidWake),
             name: NSWorkspace.didWakeNotification,
             object: nil)
+    }
+
+    func tick() {
+        readCache()
+        buildMenu()
+        if cacheAge > refreshInterval { runUpdater() }
     }
 
     @objc func systemDidWake() {
@@ -55,16 +65,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // stays silent even though this parent app is only ad-hoc signed — the
     // keychain call is attributed to security, not to us.
     func runUpdater() {
+        if updaterRunning { return }
+        updaterRunning = true
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [updaterScript]
         task.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
+                self?.updaterRunning = false
                 self?.readCache()
                 self?.buildMenu()
             }
         }
-        try? task.run()
+        do {
+            try task.run()
+        } catch {
+            updaterRunning = false
+        }
     }
 
     // NSMenuDelegate: re-read the cache every time the user opens the menu so
@@ -102,9 +119,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
     }
 
+    var cacheAge: TimeInterval {
+        guard let lu = lastUpdate else { return .greatestFiniteMagnitude }
+        return Date().timeIntervalSince(lu)
+    }
+
     var isStale: Bool {
-        guard let lu = lastUpdate else { return true }
-        return Date().timeIntervalSince(lu) > stalenessThreshold
+        return cacheAge > stalenessThreshold
     }
 
     // Green (0%) → Yellow (50%) → Red (100%).
