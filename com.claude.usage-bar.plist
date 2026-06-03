@@ -15,5 +15,10 @@
     <true/>
     <key>ProcessType</key>
     <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LAUNCH_SRC</key>
+        <string>agent</string>
+    </dict>
 </dict>
 </plist>

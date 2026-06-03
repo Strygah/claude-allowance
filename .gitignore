@@ -6,3 +6,6 @@ ClaudeUsageBar.app/
 
 # macOS junk
 .DS_Store
+
+# Runtime log
+updater.log

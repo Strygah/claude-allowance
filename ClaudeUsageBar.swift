@@ -24,6 +24,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
+        // Opt out of App Nap. macOS aggressively throttles accessory/menu-bar
+        // apps during idle, which freezes our run-loop Timer — the real cause
+        // of the recurring staleness: the poller stopped firing while the
+        // system was awake but the app was napped. NSAppSleepDisabled is the
+        // documented, sleep-safe way to exempt the app: it stops App Nap
+        // without preventing normal system/display sleep.
+        UserDefaults.standard.set(true, forKey: "NSAppSleepDisabled")
+
         readCache()
         buildMenu()
 
@@ -70,6 +78,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [updaterScript]
+        var env = ProcessInfo.processInfo.environment
+        env["LAUNCH_SRC"] = "app"
+        task.environment = env
         task.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
                 self?.updaterRunning = false
