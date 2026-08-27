@@ -106,10 +106,27 @@ parse_and_write() {
     FH_PCT=$(/usr/bin/python3 -c "print(round(max(float('${FH:-0}') * 100, 0), 2))" 2>/dev/null || echo 0)
     SD_PCT=$(/usr/bin/python3 -c "print(round(max(float('${SD:-0}') * 100, 0), 2))" 2>/dev/null || echo 0)
     NOW=$(/usr/bin/python3 -c "import time; print(time.time())")
+    # Probe headers carry no scoped (Fable) weekly, only the rich endpoint
+    # does. Carry the previous cache's scoped keys through fallback cycles
+    # for up to 6h (stamped by usage-to-cache.py) so a rich-endpoint hiccup
+    # doesn't blank the Fable slot every minute; after 6h they age out.
+    SCOPED=$(/usr/bin/python3 - "$CACHE" <<'PYEOF' 2>/dev/null
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+    fa = d.get("scoped_7d_fetched_at")
+    if fa and time.time() - fa < 6 * 3600 and d.get("scoped_7d") is not None:
+        keep = {k: d[k] for k in ("scoped_7d", "scoped_7d_reset",
+                "scoped_7d_label", "scoped_7d_fetched_at") if k in d}
+        print(json.dumps(keep)[1:-1])
+except Exception:
+    pass
+PYEOF
+)
     # Atomic write (temp + rename) so a concurrent writer can't leave the menu
     # app reading a half-written cache.
     cat > "$CACHE.$$" <<JSONEOF
-{"five_hour":${FH_PCT},"seven_day":${SD_PCT},"five_hour_reset":${FH_RESET:-0},"seven_day_reset":${SD_RESET:-0},"timestamp":${NOW}}
+{"five_hour":${FH_PCT},"seven_day":${SD_PCT},"five_hour_reset":${FH_RESET:-0},"seven_day_reset":${SD_RESET:-0},"timestamp":${NOW}${SCOPED:+,${SCOPED}}}
 JSONEOF
     mv -f "$CACHE.$$" "$CACHE"
     LAST_FH_PCT="$FH_PCT"; LAST_SD_PCT="$SD_PCT"

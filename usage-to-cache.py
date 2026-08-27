@@ -54,15 +54,34 @@ now = time.time()
 # Atomic write (temp + rename) so a concurrent writer (app timer + LaunchAgent,
 # or a manual "Refresh now" overlapping an in-flight fetch) can never leave the
 # menu app reading a half-written, unparseable cache.
+cache = {
+    "five_hour": five,
+    "seven_day": seven,
+    "five_hour_reset": iso_to_epoch(fh.get("resets_at")),
+    "seven_day_reset": iso_to_epoch(sd.get("resets_at")),
+    "timestamp": now,
+}
+
+# Model-scoped weekly (today: "Fable"). Only the rich endpoint has this —
+# the header-probe fallback writes a cache without these keys, and the app
+# hides the scoped slot whenever they're absent. Label comes from the
+# payload so a future Opus/Sonnet-scoped week works unchanged.
+for lim in (d.get("limits") or []):
+    if isinstance(lim, dict) and lim.get("kind") == "weekly_scoped" \
+            and lim.get("percent") is not None:
+        scope = lim.get("scope") or {}
+        model = scope.get("model") or {}
+        cache["scoped_7d"] = float(lim["percent"])
+        cache["scoped_7d_reset"] = iso_to_epoch(lim.get("resets_at"))
+        cache["scoped_7d_label"] = model.get("display_name") or "Scoped"
+        # Fetch stamp lets the probe fallback carry these keys for a bounded
+        # time instead of blanking the slot on every fallback cycle.
+        cache["scoped_7d_fetched_at"] = now
+        break
+
 tmp = "%s.tmp.%d" % (CACHE, os.getpid())
 with open(tmp, "w") as f:
-    json.dump({
-        "five_hour": five,
-        "seven_day": seven,
-        "five_hour_reset": iso_to_epoch(fh.get("resets_at")),
-        "seven_day_reset": iso_to_epoch(sd.get("resets_at")),
-        "timestamp": now,
-    }, f)
+    json.dump(cache, f)
 os.replace(tmp, CACHE)
 
 # Rich history, deduped on the utilization signature so idle minutes don't flood

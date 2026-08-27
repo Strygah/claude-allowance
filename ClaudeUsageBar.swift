@@ -7,7 +7,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sevenDay: Double?
     var fiveHourReset: Date?
     var sevenDayReset: Date?
+    var scopedSevenDay: Double?        // model-scoped weekly (today: Fable)
+    var scopedSevenDayReset: Date?
+    var scopedLabel: String?           // display name from the API payload
     var lastUpdate: Date?
+
+    // Bar shows the scoped weekly only when this is on (menu toggle,
+    // persisted). The dropdown row shows whenever data exists, regardless.
+    let showScopedKey = "ShowScopedWeekly"
+    var showScopedWeekly: Bool { UserDefaults.standard.bool(forKey: showScopedKey) }
     var fetchStatus: String?   // "ok" | "token_expired" | "error" — written by the updater
     var statusDetail: String?
 
@@ -138,6 +146,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             fiveHour = nil; sevenDay = nil
             fiveHourReset = nil; sevenDayReset = nil
+            scopedSevenDay = nil; scopedSevenDayReset = nil; scopedLabel = nil
             lastUpdate = nil
             updateTitle()
             return
@@ -150,6 +159,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if let r = json["seven_day_reset"] as? Double, r > 0 {
             sevenDayReset = Date(timeIntervalSince1970: r)
+        }
+        // Scoped weekly keys exist only when the rich usage endpoint served
+        // the cache; the probe fallback omits them and the slot disappears.
+        scopedSevenDay = (json["scoped_7d"] as? Double).flatMap { $0.isNaN ? nil : $0 }
+        scopedLabel = json["scoped_7d_label"] as? String
+        if let r = json["scoped_7d_reset"] as? Double, r > 0 {
+            scopedSevenDayReset = Date(timeIntervalSince1970: r)
+        } else {
+            scopedSevenDayReset = nil
         }
         if let ts = json["timestamp"] as? Double {
             lastUpdate = Date(timeIntervalSince1970: ts)
@@ -268,6 +286,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return NSAttributedString(attachment: attachment)
     }
 
+    // The right column when "show Fable weekly" is on: all-models weekly
+    // stacked over the scoped (Fable) weekly at ~7.5pt, each colored by its
+    // own utilization. Same attachment technique as the notches: drawn in
+    // the big font's line box so nothing shifts, colors resolved per draw.
+    func stackedWeeklies(top: Double, topAlpha: CGFloat, bottom: Double,
+                         bottomAlpha: CGFloat, font: NSFont) -> NSAttributedString {
+        let small = NSFont.monospacedSystemFont(ofSize: 7.5, weight: .medium)
+        let topAttr: [NSAttributedString.Key: Any] = [
+            .font: small, .foregroundColor: colorForPercent(top, alpha: topAlpha)]
+        let botAttr: [NSAttributedString.Key: Any] = [
+            .font: small, .foregroundColor: colorForPercent(bottom, alpha: bottomAlpha)]
+        let topStr = NSAttributedString(string: String(format: "%.0f", top), attributes: topAttr)
+        let botStr = NSAttributedString(string: String(format: "%.0f", bottom), attributes: botAttr)
+
+        let ascent = font.ascender
+        let descent = abs(font.descender)
+        let height = ascent + descent
+        let pad: CGFloat = 1.2   // breathing room after the notch column
+        let width = max(topStr.size().width, botStr.size().width) + pad
+
+        // Rows fill the box: bottom row baseline on the box floor, top row
+        // cap flush with the box top, gap is whatever remains between caps.
+        let capS = small.capHeight
+        let topBaseline = height - capS
+        // draw(at:) in an unflipped context puts the point at the line box's
+        // bottom-left, |descender| below the baseline — offset for that.
+        let baselineToBox = small.descender   // negative
+
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            botStr.draw(at: NSPoint(x: pad, y: 0 + baselineToBox))
+            topStr.draw(at: NSPoint(x: pad, y: topBaseline + baselineToBox))
+            return true
+        }
+
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: -descent, width: width, height: height)
+        return NSAttributedString(attachment: attachment)
+    }
+
     func updateTitle() {
         let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
         let result = NSMutableAttributedString()
@@ -296,11 +354,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             result.append(NSAttributedString(string: "|", attributes: [.font: font, .foregroundColor: sepColor]))
         }
 
-        let sdStr = sdPct.map { String(format: "%.0f", $0) } ?? "--"
-        let sdColor = sdPct != nil
-            ? colorForPercent(sdPct ?? 0, alpha: sdAlpha)
-            : NSColor.tertiaryLabelColor
-        result.append(NSAttributedString(string: sdStr, attributes: [.font: font, .foregroundColor: sdColor]))
+        // Right column: with the toggle on and scoped data present, stack
+        // all-models weekly over the scoped weekly; otherwise the classic
+        // single full-size number (also the fallback when data is absent).
+        let (scPct, scProj) = projected(scopedSevenDay, reset: scopedSevenDayReset)
+        let scAlpha: CGFloat = (isStale || scProj) ? 0.5 : 1.0
+        if showScopedWeekly, let sd = sdPct, let sc = scPct {
+            result.append(stackedWeeklies(top: sd, topAlpha: sdAlpha,
+                                          bottom: sc, bottomAlpha: scAlpha, font: font))
+        } else {
+            let sdStr = sdPct.map { String(format: "%.0f", $0) } ?? "--"
+            let sdColor = sdPct != nil
+                ? colorForPercent(sdPct ?? 0, alpha: sdAlpha)
+                : NSColor.tertiaryLabelColor
+            result.append(NSAttributedString(string: sdStr, attributes: [.font: font, .foregroundColor: sdColor]))
+        }
 
         DispatchQueue.main.async {
             self.statusItem.button?.attributedTitle = result
@@ -347,6 +415,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sdItem.isEnabled = false
         menu.addItem(sdItem)
 
+        // Scoped weekly row: shown whenever data exists, independent of the
+        // bar toggle. Absent on probe-fallback data, which has no such bucket.
+        if let scRaw = scopedSevenDay {
+            let (scPct, scProj) = projected(scRaw, reset: scopedSevenDayReset)
+            let scStr = scPct.map { String(format: "%.1f%%", $0) } ?? "N/A"
+            let scItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            scItem.attributedTitle = coloredMenuItem(
+                "7d \(scopedLabel ?? "Fable")  \(scStr)  resets \(timeUntil(scopedSevenDayReset))",
+                pct: scPct ?? 0,
+                hasData: scPct != nil,
+                dim: isStale || scProj)
+            scItem.isEnabled = false
+            menu.addItem(scItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
         let updatedText: String
         if let lu = lastUpdate {
@@ -370,6 +453,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let toggleItem = NSMenuItem(title: "Show \(scopedLabel ?? "Fable") weekly",
+                                    action: #selector(toggleScopedWeekly), keyEquivalent: "")
+        toggleItem.target = self
+        toggleItem.state = showScopedWeekly ? .on : .off
+        menu.addItem(toggleItem)
+
         let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
@@ -392,6 +481,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
             .foregroundColor: color
         ])
+    }
+
+    @objc func toggleScopedWeekly() {
+        UserDefaults.standard.set(!showScopedWeekly, forKey: showScopedKey)
+        buildMenu()
+        updateTitle()
     }
 
     @objc func refreshNow() {

@@ -89,6 +89,7 @@ launchctl bootout gui/$(id -u)/com.claude.usage-bar
 | Display | Meaning |
 |---------|---------|
 | `42⣿18` vivid | Fresh data — 5h=42%, 7d=18%. The separator is five stacked hour notches: bright ones are whole hours left in the 5h window, the in-progress hour fades with its remaining fraction, spent hours are faint stubs. |
+| `42⣿18/37` (stacked right column) | "Show Fable weekly" toggled on in the menu: the right column stacks the all-models weekly (top) over the model-scoped Fable weekly (bottom) at small size; 5h stays full size. The scoped bucket comes only from the rich usage endpoint (`scoped_7d*` cache keys); on probe-fallback data it's carried for up to 6h from its last real fetch, then the bar reverts to the two-number display. |
 | `42\|18` (plain pipe) | No active 5h window (reset already passed, or no reset data) — nothing to count down. |
 | `42⣿18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
 | `--\|--` | No cache file. Run `update-rate-limits.sh` manually, or check the LaunchAgent loaded. |
@@ -106,6 +107,11 @@ always current the moment you look.
   `com.claude.usage-bar`.
 - `update-rate-limits.sh` — fetches and caches ratelimit headers; pulls the
   OAuth token from keychain as needed.
+- `usage-to-cache.py` — parses the rich `/api/oauth/usage` payload into the
+  cache (incl. the scoped Fable weekly) + appends the deduped history.
+- `restart.sh` — quit → build → relaunch → verify a single instance survived
+  (dodges the Gatekeeper stale-signature SIGKILL and the LaunchServices
+  duplicate-relaunch race).
 - `com.claude.usage-bar.plist` — LaunchAgent that runs the updater every 60s.
 
 ## Known limits
