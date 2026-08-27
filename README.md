@@ -1,51 +1,96 @@
 # ClaudeUsageBar
 
-macOS menu bar app showing Claude API rate limit utilization (5-hour
-session + 7-day weekly) with green→yellow→red gradient.
+![ClaudeUsageBar in the macOS menu bar](docs/hero.png)
 
-Repo: github.com/Strygah/claude-usage-bar (private)
-Install location: `~/.claude/usage-bar/`
+Always-visible Claude rate limits in the macOS menu bar: **5h session usage**, **weekly usage**, and a notched gauge showing **exactly how much of your 5-hour window is left**.
+
+If your work runs on Claude (Claude Code, Desktop, claude.ai) on a Pro/Max subscription, the limits are invisible until you slam into one mid-task. This keeps them one glance away, updated every minute, whether or not any Claude client is running.
+
+![How to read the display](docs/explainer.png)
+
+## Features
+
+- 5h and 7d utilization percentages, colored green → red
+- Time gauge notched into 5 hour-segments: the bright fill is the exact time remaining in your current 5h window, draining in real time
+- Optional third number: your model-scoped (Fable) weekly allowance
+- Dropdown with exact percentages and reset countdowns
+- Dims when data is stale; projects a rolled-over window to 0% instead of showing ghosts
+- Primary data source costs **zero quota**; a 1-token probe keeps the bar alive as a fallback
+- Single-file Swift app, no dependencies, built and ad-hoc signed locally by the installer
+
+## Requirements
+
+- macOS 13+
+- Xcode Command Line Tools (`xcode-select --install`)
+- A Claude **Pro or Max** subscription, signed in via the Claude Code CLI at least once (`claude` in a terminal)
+
+## Install
+
+```bash
+git clone https://github.com/Strygah/claude-usage-bar.git ~/.claude/usage-bar
+cd ~/.claude/usage-bar
+./install.sh
+```
+
+The install location must be `~/.claude/usage-bar` — the app and updater reference it internally, and `install.sh` enforces this.
+
+`install.sh` compiles the app and installs two LaunchAgents:
+
+| Agent | Job |
+|---|---|
+| `com.claude.usage-bar` | Runs the updater every 60s, keeps `~/.claude/rate-limits.json` fresh even when no Claude client is open |
+| `com.claude.usage-bar.app` | Starts the menu bar app at login, relaunches it on crash (a clean Quit is honored) |
+
+If the bar shows `--|--`: sign in once with `claude` in a terminal, then click the item → **Refresh now**.
+
+Optional resilience: `./provision-setup-token.sh` provisions a ~1-year token (via `claude setup-token`) so the indicator survives keychain-token expiry during desktop-app-only stretches. Without it the bar simply dims until you use the CLI again.
+
+**Upgrade:** `git pull && ./install.sh` &nbsp;·&nbsp; **Uninstall:** `./uninstall.sh`
+
+## How to read it
+
+| Display | Meaning |
+|---------|---------|
+| `34⣿27` vivid | Fresh data — 5h=34%, 7d=27%. The middle column is the 5h window clock: bright fill = exact time remaining (drains downward), each of the 5 segments = 1 hour, faint track = full extent. |
+| `34⣿27/37` | "Show Fable weekly" toggled on: the right column stacks all-models weekly (top) over Fable-only weekly (bottom). |
+| thin plain bar in the middle | No active 5h window (nothing to count down). |
+| dimmed | Cache is >5 min old (updater failing — check `launchctl list \| grep usage-bar`) or the shown value is a projected rollover awaiting fresh confirmation. |
+| `--\|--` | No cache yet. Sign in via `claude`, then Refresh now. |
+
+![Optional Fable weekly](docs/fable.png)
+
+### Fable weekly (optional)
+
+Max plans carry a model-scoped weekly limit alongside the all-models one (currently scoped to Fable). The rich usage endpoint exposes it; the bar can show it as a third number, toggled via the menu item **Show Fable weekly** (off by default). The dropdown row appears whenever the data exists, regardless of the toggle.
+
+Scoped data comes only from the primary endpoint (keychain token). On probe-fallback data it is carried for up to 6h from its last real fetch, then ages out and the bar reverts to two numbers.
 
 ## Architecture
 
-Two pieces plus a LaunchAgent:
+Two pieces plus two LaunchAgents:
 
 | Piece | When it runs | What it does |
 |-------|--------------|--------------|
-| `update-rate-limits.sh` | LaunchAgent, every 60s | Reads the OAuth token (`api-token` file, bootstrapped from keychain), hits `POST /v1/messages` with `max_tokens:1`, parses the `anthropic-ratelimit-unified-*` response headers, writes `~/.claude/rate-limits.json`. Self-bootstrapping: pulls a fresh token from the `Claude Code-credentials` keychain item whenever the file is missing or returns 401. |
-| `com.claude.usage-bar.plist` | `~/Library/LaunchAgents/` | Runs the updater every 60s regardless of whether Claude Code is active. This is what keeps the data fresh during idle periods. |
-| `ClaudeUsageBar.swift` | All the time (menu bar app) | Reads `~/.claude/rate-limits.json` every 10s and on every menu open. Renders the menu bar text + dropdown. No network calls, no keychain access. |
+| `update-rate-limits.sh` | Every 60s (LaunchAgent) + on demand from the app | Fetches usage data (see Data sources) and writes `~/.claude/rate-limits.json`. Never calls an OAuth refresh endpoint, never writes the keychain. |
+| `usage-to-cache.py` | Called by the updater | Parses the rich usage payload into the cache (incl. the scoped weekly) and appends a deduped history for your own analysis. |
+| `ClaudeUsageBar.swift` | Always (menu bar app) | Pure UI: reads the cache every 15s and on menu open. No network, no keychain. Renders the whole item as one 22pt image (text attachments clip at the font's line box). |
+| `restart.sh` | Dev loop | Rebuild + relaunch through launchd (`kickstart`), converging to exactly one instance — replacing a running app's binary can trip Gatekeeper's stale-signature kill and launchd's KeepAlive relaunch race. |
 
 ### Why this shape
 
-macOS Sequoia/Tahoe periodically re-attests ad-hoc-signed apps that read
-OAuth-class keychain items, prompting for the login password several times
-a day. The fix: the menu bar app never touches the keychain. All keychain
-access goes through `/usr/bin/security` (Apple-signed, trusted in the
-item's ACL) inside the updater script — which reads the keychain silently
-from any context, including a background LaunchAgent.
+macOS periodically re-attests ad-hoc-signed apps that read OAuth-class keychain items, prompting for the login password several times a day. The fix: the menu bar app **never touches the keychain**. All keychain access goes through `/usr/bin/security` (Apple-signed, trusted in the item's ACL) inside the updater script, which reads silently from any context, including a background LaunchAgent.
 
-Earlier versions used Claude Code `SessionStart` + `PostToolUse` hooks to
-drive the refresh, but that only updated during CC activity, leaving the
-menu stale during idle. The LaunchAgent removes the CC dependency entirely.
+## Data sources
 
-## Auth: OAuth tokens need Bearer, not x-api-key
+Priority order in the updater:
 
-The Anthropic API rejects `sk-ant-oat-*` OAuth tokens passed via
-`x-api-key` (silent HTTP 401, no ratelimit headers). The correct
-pattern for subscription OAuth tokens is:
+1. **`GET /api/oauth/usage`** with the keychain OAuth token (needs the `user:profile` scope). A pure usage query: costs **no quota** and returns rich data — exact utilizations, ISO reset times, per-model weekly buckets. Requires a `User-Agent: claude-code/<ver>` prefix or the endpoint 429s.
+2. **Fallback probe:** a `max_tokens: 1` call to `/v1/messages`, reading the `anthropic-ratelimit-unified-*` response headers. Works with a long-lived `claude setup-token` (which lacks the scope for source 1). Costs 1 output token per minute against the very limit it measures — negligible, but real.
 
-```
-Authorization: Bearer <sk-ant-oat-...>
-anthropic-version: 2023-06-01
-anthropic-beta: oauth-2025-04-20
-```
+### OAuth gotcha (if you hack on this)
 
-`x-api-key` is only valid for actual API keys (`sk-ant-api03-*`).
+Subscription OAuth tokens (`sk-ant-oat-*`) must be sent as `Authorization: Bearer` **plus** `anthropic-beta: oauth-2025-04-20`. Passing them via `x-api-key` returns a silent 401. Rate-limit data is only available via response headers or the usage endpoint:
 
-## Key technical discovery
-
-Rate-limit data is ONLY available via API response headers:
 ```
 anthropic-ratelimit-unified-5h-utilization: 0.43
 anthropic-ratelimit-unified-7d-utilization: 0.56
@@ -53,74 +98,30 @@ anthropic-ratelimit-unified-5h-reset: 1779571800
 anthropic-ratelimit-unified-7d-reset: 1779883200
 ```
 
-- 200 + 429 both return these headers (429 reports 100%)
-- 401 returns nothing useful
-- The minimum-cost ping is 1 Haiku output token. NB: it's an OAuth
-  subscription call, so it counts a sliver against the very rate limit
-  it measures — negligible at `max_tokens:1` / 60s, but real.
+Both 200 and 429 responses carry these headers (a 429 reports the exhausted window).
 
-## Build & install
+## Disclaimer
 
-```bash
-# 1. Clone into the install location
-git clone git@github.com:Strygah/claude-usage-bar.git ~/.claude/usage-bar
-cd ~/.claude/usage-bar
-
-# 2. Install + load the LaunchAgent (refreshes the cache every 60s)
-cp com.claude.usage-bar.plist ~/Library/LaunchAgents/
-#   edit the hardcoded /Users/<you> path in the plist if not strygah
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude.usage-bar.plist
-
-# 3. Build and launch the menu bar app
-./build.sh
-open ./ClaudeUsageBar.app
-```
-
-Requires: Xcode CLI tools (`swift`), macOS 13+, Claude Code logged in
-(for the keychain OAuth token).
-
-To stop/remove the agent:
-```bash
-launchctl bootout gui/$(id -u)/com.claude.usage-bar
-```
-
-## How the menu reads
-
-| Display | Meaning |
-|---------|---------|
-| `42⣿18` vivid | Fresh data — 5h=42%, 7d=18%. The separator is a full-height vertical gauge notched into 5 hour segments: the bright fill height is the exact time remaining in the 5h window (drains downward), whole hours left are countable as fully lit segments, the faint track shows the full extent. The whole item renders as one 22pt image (text attachments clip at the font line box). |
-| `42⣿18/37` (stacked right column) | "Show Fable weekly" toggled on in the menu: the right column stacks the all-models weekly (top) over the model-scoped Fable weekly (bottom), same 10pt size as everything else. The scoped bucket comes only from the rich usage endpoint (`scoped_7d*` cache keys); on probe-fallback data it's carried for up to 6h from its last real fetch, then the bar reverts to the two-number display. |
-| `42\|18` (plain pipe) | No active 5h window (reset already passed, or no reset data) — nothing to count down. |
-| `42⣿18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
-| `--\|--` | No cache file. Run `update-rate-limits.sh` manually, or check the LaunchAgent loaded. |
-
-Click the menu to see exact percentages, reset times, and the timestamp
-of the last cache write. The menu re-reads the cache on open, so it's
-always current the moment you look.
-
-## Files
-
-- `ClaudeUsageBar.swift` — single-file Swift menu bar app. Pure UI; no
-  auth, no network. Reads only `~/.claude/rate-limits.json`.
-- `build.sh` — compiles to `.app` bundle with Info.plist
-  (LSUIElement=true → no dock icon). Ad-hoc signed with stable identifier
-  `com.claude.usage-bar`.
-- `update-rate-limits.sh` — fetches and caches ratelimit headers; pulls the
-  OAuth token from keychain as needed.
-- `usage-to-cache.py` — parses the rich `/api/oauth/usage` payload into the
-  cache (incl. the scoped Fable weekly) + appends the deduped history.
-- `restart.sh` — quit → build → relaunch → verify a single instance survived
-  (dodges the Gatekeeper stale-signature SIGKILL and the LaunchServices
-  duplicate-relaunch race).
-- `com.claude.usage-bar.plist` — LaunchAgent that runs the updater every 60s.
+Not affiliated with or endorsed by Anthropic. This tool reads **unofficial endpoints and headers** observed from official clients; Anthropic may change or remove them at any time, at which point the bar dims until the tool is updated. It never writes to your keychain and never refreshes tokens — it only reads what official clients maintain.
 
 ## Known limits
 
-- The `api-token` file lives in plaintext under `~/.claude/usage-bar/`,
-  mode 600. Same blast radius as your shell history. Gitignored.
-- If Claude Code logs out / the keychain item disappears, the updater can't
-  get a token and the menu shows `--`. Log back into CC.
-- Ad-hoc signed — fresh macOS install may need to allow first launch via
-  System Settings → Privacy & Security if Gatekeeper complains.
-- The LaunchAgent path in the plist is hardcoded to an absolute home dir.
-  Edit it on a different machine/user.
+- Requires a subscription (Pro/Max) sign-in; API-key accounts have different rate-limit surfaces this tool doesn't read.
+- The optional `setup-token` file lives in plaintext under `~/.claude/usage-bar/`, mode 600, gitignored. Same blast radius as your shell history.
+- If the keychain token expires and no setup-token is provisioned, the bar dims until you use the Claude Code CLI again.
+- Ad-hoc signed: a fresh macOS install may require allowing the app under System Settings → Privacy & Security on first launch.
+
+## Files
+
+- `ClaudeUsageBar.swift` — the app (single file, pure UI)
+- `build.sh` — compiles to an `.app` bundle, ad-hoc signs it
+- `install.sh` / `uninstall.sh` — LaunchAgent setup / removal
+- `restart.sh` — rebuild + relaunch for development
+- `update-rate-limits.sh` — data fetcher (keychain via `/usr/bin/security`)
+- `usage-to-cache.py` — rich-payload parser + local usage history
+- `provision-setup-token.sh` — optional ~1-year fallback token
+- `setup-token-test.sh` — diagnostic comparing token sources
+
+## License
+
+[MIT](LICENSE)
