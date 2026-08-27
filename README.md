@@ -6,6 +6,10 @@ Always-visible Claude rate limits in the macOS menu bar: **5h session usage**, *
 
 If your work runs on Claude (Claude Code, Desktop, claude.ai) on a Pro/Max subscription, the limits are invisible until you slam into one mid-task. This keeps them one glance away, updated every minute, whether or not any Claude client is running.
 
+In the wild, actual size:
+
+![Actual size in the menu bar](docs/menubar-strip.png)
+
 ![How to read the display](docs/explainer.png)
 
 ## Features
