@@ -1,8 +1,10 @@
-# ClaudeUsageBar
+# Claude Allowance
 
-![ClaudeUsageBar in the macOS menu bar](docs/hero.png)
+**Track your Claude limits in the menu bar.**
 
-Always-visible Claude rate limits in the macOS menu bar: **5h session usage**, **weekly usage**, and a notched gauge showing **exactly how much of your 5-hour window is left**.
+![Claude Allowance in the macOS menu bar](docs/hero.png)
+
+Always-visible Claude allowances: **5h session usage**, **weekly usage**, and a notched gauge showing **exactly how much of your 5-hour window is left**.
 
 If your work runs on Claude (Claude Code, Desktop, claude.ai) on a Pro/Max subscription, the limits are invisible until you slam into one mid-task. This keeps them one glance away, updated every minute, whether or not any Claude client is running.
 
@@ -31,7 +33,7 @@ In the wild, actual size:
 ## Install
 
 ```bash
-git clone https://github.com/Strygah/claude-usage-bar.git ~/.claude/usage-bar
+git clone https://github.com/Strygah/claude-allowance.git ~/.claude/usage-bar
 cd ~/.claude/usage-bar
 ./install.sh
 ```

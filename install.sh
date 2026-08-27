@@ -18,7 +18,7 @@ EXPECTED="$HOME/.claude/usage-bar"
 if [[ "$DIR" != "$EXPECTED" ]]; then
     echo "Install location must be $EXPECTED (the app hardcodes it)."
     echo "Run:"
-    echo "  git clone https://github.com/Strygah/claude-usage-bar.git ~/.claude/usage-bar"
+    echo "  git clone https://github.com/Strygah/claude-allowance.git ~/.claude/usage-bar"
     echo "  cd ~/.claude/usage-bar && ./install.sh"
     exit 1
 fi
