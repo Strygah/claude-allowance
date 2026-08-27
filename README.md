@@ -88,8 +88,9 @@ launchctl bootout gui/$(id -u)/com.claude.usage-bar
 
 | Display | Meaning |
 |---------|---------|
-| `42\|18` vivid | Fresh data — 5h=42%, 7d=18% |
-| `42\|18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
+| `42⣿18` vivid | Fresh data — 5h=42%, 7d=18%. The separator is five stacked hour notches: bright ones are whole hours left in the 5h window, the in-progress hour fades with its remaining fraction, spent hours are faint stubs. |
+| `42\|18` (plain pipe) | No active 5h window (reset already passed, or no reset data) — nothing to count down. |
+| `42⣿18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
 | `--\|--` | No cache file. Run `update-rate-limits.sh` manually, or check the LaunchAgent loaded. |
 
 Click the menu to see exact percentages, reset times, and the timestamp

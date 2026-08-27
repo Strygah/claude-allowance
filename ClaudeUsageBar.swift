@@ -8,12 +8,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var fiveHourReset: Date?
     var sevenDayReset: Date?
     var lastUpdate: Date?
+    var fetchStatus: String?   // "ok" | "token_expired" | "error" — written by the updater
+    var statusDetail: String?
 
     let cacheFile = NSString(string: "~/.claude/rate-limits.json").expandingTildeInPath
+    let statusFile = NSString(string: "~/.claude/rate-limits-status.json").expandingTildeInPath
     let updaterScript = NSString(string: "~/.claude/usage-bar/update-rate-limits.sh").expandingTildeInPath
     let stalenessThreshold: TimeInterval = 300 // 5 min — when to dim + label "(stale)"
     let refreshInterval: TimeInterval = 45     // trigger a fetch once the cache is older than this
     var updaterRunning = false                 // guard against overlapping spawns
+    var updaterStartedAt: Date?                // for the wedge watchdog below
 
     lazy var clockFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -73,8 +77,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // stays silent even though this parent app is only ad-hoc signed — the
     // keychain call is attributed to security, not to us.
     func runUpdater() {
-        if updaterRunning { return }
+        // Wedge watchdog: a previous spawn can leave updaterRunning stuck true
+        // if its terminationHandler is never delivered (the main queue can
+        // stall when the system suspends the app). A real run finishes in a few
+        // seconds (curl -m 5), so if the flag has been set longer than 30s,
+        // treat the old spawn as dead and proceed instead of blocking forever.
+        if updaterRunning {
+            if let started = updaterStartedAt, Date().timeIntervalSince(started) < 30 {
+                return
+            }
+        }
         updaterRunning = true
+        updaterStartedAt = Date()
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [updaterScript]
@@ -105,7 +119,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isStale { runUpdater() }
     }
 
+    // Latest fetch outcome from the updater, so the menu can show a precise
+    // reason ("token expired") instead of a bare "(stale)". The app itself
+    // never reads the keychain — the updater hands it this status file.
+    func readStatus() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: statusFile)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            fetchStatus = nil; statusDetail = nil
+            return
+        }
+        fetchStatus = json["status"] as? String
+        statusDetail = json["detail"] as? String
+    }
+
     func readCache() {
+        readStatus()
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: cacheFile)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             fiveHour = nil; sevenDay = nil
@@ -139,6 +167,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return cacheAge > stalenessThreshold
     }
 
+    // When a window's reset has already passed AND our cached data predates
+    // that reset, the window has rolled over since we last fetched — so unless
+    // work happened (and if it had, a fresh fetch would have landed), the true
+    // utilization is ~0. Project to 0 and flag it. Flagged values are dimmed
+    // to signal "estimated, not freshly confirmed". The reset countdown is
+    // intentionally left showing "now" until a real fetch confirms the window.
+    func projected(_ percent: Double?, reset: Date?) -> (pct: Double?, isProjected: Bool) {
+        guard let percent = percent, let reset = reset else {
+            return (percent, false)
+        }
+        // No timestamp means we can't confirm the data is post-rollover, so
+        // treat it as old: a reset that has already passed still projects to 0.
+        let lu = lastUpdate ?? Date.distantPast
+        if lu < reset && Date() > reset {
+            return (0, true)
+        }
+        return (percent, false)
+    }
+
     // Green (0%) → Yellow (50%) → Red (100%).
     // `darkened` knocks brightness down for readability on light menu backgrounds.
     func colorForPercent(_ pct: Double, alpha: CGFloat = 1.0, darkened: Bool = false) -> NSColor {
@@ -156,23 +203,102 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return NSColor(red: r * scale, green: g * scale, blue: 0, alpha: alpha)
     }
 
+    // The separator cell rendered as a 5h-window countdown: five stacked
+    // segments, one per hour. Bright segments are whole hours still ahead,
+    // the in-progress hour fades with its remaining fraction, spent hours
+    // stay as faint stubs. Drawn at exactly the "|" advance width so the
+    // status item footprint doesn't change. Returns nil when no window is
+    // active (no data, or the reset already passed) — caller falls back to
+    // the plain "|".
+    func fiveHourNotches(dim: CGFloat, font: NSFont) -> NSAttributedString? {
+        guard fiveHour != nil, let reset = fiveHourReset else { return nil }
+        let remaining = reset.timeIntervalSinceNow / 18000.0
+        guard remaining > 0 else { return nil }
+        let hoursLeft = min(remaining, 1.0) * 5.0
+        let full = Int(hoursLeft + 1e-9)
+        let frac = CGFloat(hoursLeft - Double(full))
+
+        let width = ("|" as NSString).size(withAttributes: [.font: font]).width
+        // Span the font's full line box — ascender to descender, ~12pt, the
+        // same vertical extent the old "|" glyph occupied. This is the
+        // practical ceiling for a text attachment: the status-bar button
+        // lays the title out against the font's own line metrics and CLIPS
+        // whatever an attachment adds beyond them (an 18pt attempt rendered
+        // fine via NSStringDrawing but came back clipped to cap height in
+        // the real bar). Going genuinely taller than the line box means a
+        // custom button subview, not text.
+        let ascent = font.ascender
+        let descent = abs(font.descender)
+        let height = ascent + descent
+        let gap: CGFloat = 0.8
+        let segH = (height - 4 * gap) / 5
+        let segW: CGFloat = 2.4
+        let x = (width - segW) / 2
+
+        // Handler-based NSImage: the closure re-runs on every draw, so
+        // labelColor resolves against the menu bar's appearance at that
+        // moment — a flat bitmap would bake in whichever mode was active
+        // when the title was built and stop adapting.
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            for i in 0..<5 {
+                let alpha: CGFloat
+                if i < full {
+                    alpha = 0.95
+                } else if i == full {
+                    alpha = max(0.25, frac * 0.95)
+                } else {
+                    // 0.25, not fainter: wallpaper-tinted menu bars swallow
+                    // anything below ~0.2 and the column reads as a colon.
+                    alpha = 0.25
+                }
+                NSColor.labelColor.withAlphaComponent(alpha * dim).setFill()
+                let y = CGFloat(i) * (segH + gap)
+                NSBezierPath(roundedRect: NSRect(x: x, y: y, width: segW, height: segH),
+                             xRadius: 0.8, yRadius: 0.8).fill()
+            }
+            return true
+        }
+
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        // Bottom at the descender line, top at the ascender — exactly the
+        // box the digits' font already claims, so line metrics (and the
+        // digits' position) don't move.
+        attachment.bounds = CGRect(x: 0, y: -descent, width: width, height: height)
+        return NSAttributedString(attachment: attachment)
+    }
+
     func updateTitle() {
         let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
-        let dimAlpha: CGFloat = isStale ? 0.5 : 1.0
         let result = NSMutableAttributedString()
 
-        let fhStr = fiveHour.map { String(format: "%.0f", $0) } ?? "--"
-        let fhColor = fiveHour != nil
-            ? colorForPercent(fiveHour ?? 0, alpha: dimAlpha)
+        // Dim per-window when the cache is stale OR the value is a rolled-over
+        // projection — both mean "not freshly confirmed".
+        let (fhPct, fhProj) = projected(fiveHour, reset: fiveHourReset)
+        let (sdPct, sdProj) = projected(sevenDay, reset: sevenDayReset)
+        let fhAlpha: CGFloat = (isStale || fhProj) ? 0.5 : 1.0
+        let sdAlpha: CGFloat = (isStale || sdProj) ? 0.5 : 1.0
+
+        let fhStr = fhPct.map { String(format: "%.0f", $0) } ?? "--"
+        let fhColor = fhPct != nil
+            ? colorForPercent(fhPct ?? 0, alpha: fhAlpha)
             : NSColor.tertiaryLabelColor
         result.append(NSAttributedString(string: fhStr, attributes: [.font: font, .foregroundColor: fhColor]))
 
-        let sepColor = NSColor.white.withAlphaComponent(dimAlpha)
-        result.append(NSAttributedString(string: "|", attributes: [.font: font, .foregroundColor: sepColor]))
+        // Separator doubles as the 5h-window clock (hour notches). Dimmed by
+        // fhAlpha since it describes the 5h window specifically.
+        if let notches = fiveHourNotches(dim: fhAlpha, font: font) {
+            result.append(notches)
+        } else {
+            // labelColor adapts to light/dark menu bars; plain white vanishes
+            // on a light menu bar.
+            let sepColor = NSColor.labelColor.withAlphaComponent(max(fhAlpha, sdAlpha))
+            result.append(NSAttributedString(string: "|", attributes: [.font: font, .foregroundColor: sepColor]))
+        }
 
-        let sdStr = sevenDay.map { String(format: "%.0f", $0) } ?? "--"
-        let sdColor = sevenDay != nil
-            ? colorForPercent(sevenDay ?? 0, alpha: dimAlpha)
+        let sdStr = sdPct.map { String(format: "%.0f", $0) } ?? "--"
+        let sdColor = sdPct != nil
+            ? colorForPercent(sdPct ?? 0, alpha: sdAlpha)
             : NSColor.tertiaryLabelColor
         result.append(NSAttributedString(string: sdStr, attributes: [.font: font, .foregroundColor: sdColor]))
 
@@ -199,37 +325,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
 
-        let fhStr = fiveHour.map { String(format: "%.1f%%", $0) } ?? "N/A"
+        let (fhPct, fhProj) = projected(fiveHour, reset: fiveHourReset)
+        let fhStr = fhPct.map { String(format: "%.1f%%", $0) } ?? "N/A"
         let fhItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         fhItem.attributedTitle = coloredMenuItem(
             "5h   \(fhStr)  resets \(timeUntil(fiveHourReset))",
-            pct: fiveHour ?? 0,
-            hasData: fiveHour != nil)
+            pct: fhPct ?? 0,
+            hasData: fhPct != nil,
+            dim: isStale || fhProj)
         fhItem.isEnabled = false
         menu.addItem(fhItem)
 
-        let sdStr = sevenDay.map { String(format: "%.1f%%", $0) } ?? "N/A"
+        let (sdPct, sdProj) = projected(sevenDay, reset: sevenDayReset)
+        let sdStr = sdPct.map { String(format: "%.1f%%", $0) } ?? "N/A"
         let sdItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         sdItem.attributedTitle = coloredMenuItem(
             "7d   \(sdStr)  resets \(timeUntil(sevenDayReset))",
-            pct: sevenDay ?? 0,
-            hasData: sevenDay != nil)
+            pct: sdPct ?? 0,
+            hasData: sdPct != nil,
+            dim: isStale || sdProj)
         sdItem.isEnabled = false
         menu.addItem(sdItem)
 
         menu.addItem(NSMenuItem.separator())
         let updatedText: String
         if let lu = lastUpdate {
-            let suffix = isStale ? "  (stale)" : ""
+            let suffix: String
+            if fetchStatus == "token_expired" {
+                suffix = "  token expired, open a Claude client"
+            } else if isStale {
+                suffix = "  (stale)"
+            } else {
+                suffix = ""
+            }
             updatedText = "updated \(clockFormatter.string(from: lu))\(suffix)"
+        } else if fetchStatus == "token_expired" {
+            updatedText = "token expired, open a Claude client"
         } else {
-            updatedText = "no data — run any Claude Code command"
+            updatedText = "no data, run any Claude Code command"
         }
         let luItem = NSMenuItem(title: updatedText, action: nil, keyEquivalent: "")
         luItem.isEnabled = false
         menu.addItem(luItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
 
         let openItem = NSMenuItem(title: "Usage Page...", action: #selector(openUsage), keyEquivalent: "u")
         openItem.target = self
@@ -242,12 +385,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
     }
 
-    func coloredMenuItem(_ text: String, pct: Double, hasData: Bool) -> NSAttributedString {
-        let color = hasData ? colorForPercent(pct, darkened: true) : NSColor.secondaryLabelColor
+    func coloredMenuItem(_ text: String, pct: Double, hasData: Bool, dim: Bool = false) -> NSAttributedString {
+        let base = hasData ? colorForPercent(pct, darkened: true) : NSColor.secondaryLabelColor
+        let color = dim ? base.withAlphaComponent(0.5) : base
         return NSAttributedString(string: text, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
             .foregroundColor: color
         ])
+    }
+
+    @objc func refreshNow() {
+        // Force an immediate fetch regardless of cache age. Reset the watchdog
+        // flag first so a (rare) wedged spawn can't swallow the manual press.
+        updaterRunning = false
+        runUpdater()
     }
 
     @objc func openUsage() {
