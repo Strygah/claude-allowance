@@ -88,8 +88,8 @@ launchctl bootout gui/$(id -u)/com.claude.usage-bar
 
 | Display | Meaning |
 |---------|---------|
-| `42⣿18` vivid | Fresh data — 5h=42%, 7d=18%. The separator is five stacked hour notches: bright ones are whole hours left in the 5h window, the in-progress hour fades with its remaining fraction, spent hours are faint stubs. |
-| `42⣿18/37` (stacked right column) | "Show Fable weekly" toggled on in the menu: the right column stacks the all-models weekly (top) over the model-scoped Fable weekly (bottom) at small size; 5h stays full size. The scoped bucket comes only from the rich usage endpoint (`scoped_7d*` cache keys); on probe-fallback data it's carried for up to 6h from its last real fetch, then the bar reverts to the two-number display. |
+| `42⣿18` vivid | Fresh data — 5h=42%, 7d=18%. The separator is a full-height vertical gauge notched into 5 hour segments: the bright fill height is the exact time remaining in the 5h window (drains downward), whole hours left are countable as fully lit segments, the faint track shows the full extent. The whole item renders as one 22pt image (text attachments clip at the font line box). |
+| `42⣿18/37` (stacked right column) | "Show Fable weekly" toggled on in the menu: the right column stacks the all-models weekly (top) over the model-scoped Fable weekly (bottom), same 10pt size as everything else. The scoped bucket comes only from the rich usage endpoint (`scoped_7d*` cache keys); on probe-fallback data it's carried for up to 6h from its last real fetch, then the bar reverts to the two-number display. |
 | `42\|18` (plain pipe) | No active 5h window (reset already passed, or no reset data) — nothing to count down. |
 | `42⣿18` dimmed | Cache >5 min old. With the LaunchAgent running this should be rare — means the updater is failing (check `launchctl list \| grep usage-bar`). |
 | `--\|--` | No cache file. Run `update-rate-limits.sh` manually, or check the LaunchAgent loaded. |

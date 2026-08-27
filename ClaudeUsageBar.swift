@@ -221,157 +221,121 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return NSColor(red: r * scale, green: g * scale, blue: 0, alpha: alpha)
     }
 
-    // The separator cell rendered as a 5h-window countdown: five stacked
-    // segments, one per hour. Bright segments are whole hours still ahead,
-    // the in-progress hour fades with its remaining fraction, spent hours
-    // stay as faint stubs. Drawn at exactly the "|" advance width so the
-    // status item footprint doesn't change. Returns nil when no window is
-    // active (no data, or the reset already passed) — caller falls back to
-    // the plain "|".
-    func fiveHourNotches(dim: CGFloat, font: NSFont) -> NSAttributedString? {
-        guard fiveHour != nil, let reset = fiveHourReset else { return nil }
-        let remaining = reset.timeIntervalSinceNow / 18000.0
-        guard remaining > 0 else { return nil }
-        let hoursLeft = min(remaining, 1.0) * 5.0
-        let full = Int(hoursLeft + 1e-9)
-        let frac = CGFloat(hoursLeft - Double(full))
+    // The whole item is rendered as ONE image, not attributed text. The
+    // text-layout route caps glyph height at the font's line box (~12pt) —
+    // the status button clips anything an attachment adds beyond it. An
+    // image sidesteps that: the button centers it in the bar, clicks and
+    // the menu behave identically, and a handler-based NSImage re-runs its
+    // drawing closure per draw so labelColor keeps adapting to light/dark.
+    let barHeight: CGFloat = 22   // fits every menu bar (min thickness 24)
 
-        let width = ("|" as NSString).size(withAttributes: [.font: font]).width
-        // Span the font's full line box — ascender to descender, ~12pt, the
-        // same vertical extent the old "|" glyph occupied. This is the
-        // practical ceiling for a text attachment: the status-bar button
-        // lays the title out against the font's own line metrics and CLIPS
-        // whatever an attachment adds beyond them (an 18pt attempt rendered
-        // fine via NSStringDrawing but came back clipped to cap height in
-        // the real bar). Going genuinely taller than the line box means a
-        // custom button subview, not text.
-        let ascent = font.ascender
-        let descent = abs(font.descender)
-        let height = ascent + descent
-        let gap: CGFloat = 0.8
-        let segH = (height - 4 * gap) / 5
-        let segW: CGFloat = 2.4
-        let x = (width - segW) / 2
-
-        // Handler-based NSImage: the closure re-runs on every draw, so
-        // labelColor resolves against the menu bar's appearance at that
-        // moment — a flat bitmap would bake in whichever mode was active
-        // when the title was built and stop adapting.
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
-            for i in 0..<5 {
-                let alpha: CGFloat
-                if i < full {
-                    alpha = 0.95
-                } else if i == full {
-                    alpha = max(0.25, frac * 0.95)
-                } else {
-                    // 0.25, not fainter: wallpaper-tinted menu bars swallow
-                    // anything below ~0.2 and the column reads as a colon.
-                    alpha = 0.25
-                }
-                NSColor.labelColor.withAlphaComponent(alpha * dim).setFill()
-                let y = CGFloat(i) * (segH + gap)
-                NSBezierPath(roundedRect: NSRect(x: x, y: y, width: segW, height: segH),
+    // Continuous 5h gauge, notched into 5 hour segments by thin gaps.
+    // Bright fill height = exact remaining fraction of the window (drains
+    // downward); the faint track shows the full extent. Whole hours left
+    // are still countable as fully-lit segments.
+    func drawGaugeColumn(x: CGFloat, cellWidth: CGFloat, remaining: Double, dim: CGFloat) {
+        let rem = min(max(remaining, 0), 1)
+        let inset: CGFloat = 1.0
+        let usable = barHeight - 2 * inset
+        let gap: CGFloat = 0.9
+        let segH = (usable - 4 * gap) / 5
+        let segW: CGFloat = 2.6
+        let segX = x + (cellWidth - segW) / 2
+        for i in 0..<5 {
+            let y = inset + CGFloat(i) * (segH + gap)
+            // This segment's share of the bottom-anchored global fill
+            // (segments are hours, bottom-up).
+            let f = min(max(rem * 5 - Double(i), 0), 1)
+            NSColor.labelColor.withAlphaComponent(0.18 * dim).setFill()
+            NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH),
+                         xRadius: 0.8, yRadius: 0.8).fill()
+            if f > 0.01 {
+                NSColor.labelColor.withAlphaComponent(0.95 * dim).setFill()
+                NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH * CGFloat(f)),
                              xRadius: 0.8, yRadius: 0.8).fill()
             }
-            return true
         }
-
-        let attachment = NSTextAttachment()
-        attachment.image = image
-        // Bottom at the descender line, top at the ascender — exactly the
-        // box the digits' font already claims, so line metrics (and the
-        // digits' position) don't move.
-        attachment.bounds = CGRect(x: 0, y: -descent, width: width, height: height)
-        return NSAttributedString(attachment: attachment)
-    }
-
-    // The right column when "show Fable weekly" is on: all-models weekly
-    // stacked over the scoped (Fable) weekly at ~7.5pt, each colored by its
-    // own utilization. Same attachment technique as the notches: drawn in
-    // the big font's line box so nothing shifts, colors resolved per draw.
-    func stackedWeeklies(top: Double, topAlpha: CGFloat, bottom: Double,
-                         bottomAlpha: CGFloat, font: NSFont) -> NSAttributedString {
-        let small = NSFont.monospacedSystemFont(ofSize: 7.5, weight: .medium)
-        let topAttr: [NSAttributedString.Key: Any] = [
-            .font: small, .foregroundColor: colorForPercent(top, alpha: topAlpha)]
-        let botAttr: [NSAttributedString.Key: Any] = [
-            .font: small, .foregroundColor: colorForPercent(bottom, alpha: bottomAlpha)]
-        let topStr = NSAttributedString(string: String(format: "%.0f", top), attributes: topAttr)
-        let botStr = NSAttributedString(string: String(format: "%.0f", bottom), attributes: botAttr)
-
-        let ascent = font.ascender
-        let descent = abs(font.descender)
-        let height = ascent + descent
-        let pad: CGFloat = 1.2   // breathing room after the notch column
-        let width = max(topStr.size().width, botStr.size().width) + pad
-
-        // Rows fill the box: bottom row baseline on the box floor, top row
-        // cap flush with the box top, gap is whatever remains between caps.
-        let capS = small.capHeight
-        let topBaseline = height - capS
-        // draw(at:) in an unflipped context puts the point at the line box's
-        // bottom-left, |descender| below the baseline — offset for that.
-        let baselineToBox = small.descender   // negative
-
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
-            botStr.draw(at: NSPoint(x: pad, y: 0 + baselineToBox))
-            topStr.draw(at: NSPoint(x: pad, y: topBaseline + baselineToBox))
-            return true
-        }
-
-        let attachment = NSTextAttachment()
-        attachment.image = image
-        attachment.bounds = CGRect(x: 0, y: -descent, width: width, height: height)
-        return NSAttributedString(attachment: attachment)
     }
 
     func updateTitle() {
         let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
-        let result = NSMutableAttributedString()
+        let small = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
 
         // Dim per-window when the cache is stale OR the value is a rolled-over
         // projection — both mean "not freshly confirmed".
         let (fhPct, fhProj) = projected(fiveHour, reset: fiveHourReset)
         let (sdPct, sdProj) = projected(sevenDay, reset: sevenDayReset)
+        let (scPct, scProj) = projected(scopedSevenDay, reset: scopedSevenDayReset)
         let fhAlpha: CGFloat = (isStale || fhProj) ? 0.5 : 1.0
         let sdAlpha: CGFloat = (isStale || sdProj) ? 0.5 : 1.0
+        let scAlpha: CGFloat = (isStale || scProj) ? 0.5 : 1.0
 
-        let fhStr = fhPct.map { String(format: "%.0f", $0) } ?? "--"
-        let fhColor = fhPct != nil
-            ? colorForPercent(fhPct ?? 0, alpha: fhAlpha)
-            : NSColor.tertiaryLabelColor
-        result.append(NSAttributedString(string: fhStr, attributes: [.font: font, .foregroundColor: fhColor]))
-
-        // Separator doubles as the 5h-window clock (hour notches). Dimmed by
-        // fhAlpha since it describes the 5h window specifically.
-        if let notches = fiveHourNotches(dim: fhAlpha, font: font) {
-            result.append(notches)
-        } else {
-            // labelColor adapts to light/dark menu bars; plain white vanishes
-            // on a light menu bar.
-            let sepColor = NSColor.labelColor.withAlphaComponent(max(fhAlpha, sdAlpha))
-            result.append(NSAttributedString(string: "|", attributes: [.font: font, .foregroundColor: sepColor]))
+        func str(_ pct: Double?, _ alpha: CGFloat, _ f: NSFont) -> NSAttributedString {
+            let color = pct != nil
+                ? colorForPercent(pct ?? 0, alpha: alpha)
+                : NSColor.tertiaryLabelColor
+            return NSAttributedString(string: pct.map { String(format: "%.0f", $0) } ?? "--",
+                                      attributes: [.font: f, .foregroundColor: color])
         }
 
-        // Right column: with the toggle on and scoped data present, stack
-        // all-models weekly over the scoped weekly; otherwise the classic
-        // single full-size number (also the fallback when data is absent).
-        let (scPct, scProj) = projected(scopedSevenDay, reset: scopedSevenDayReset)
-        let scAlpha: CGFloat = (isStale || scProj) ? 0.5 : 1.0
-        if showScopedWeekly, let sd = sdPct, let sc = scPct {
-            result.append(stackedWeeklies(top: sd, topAlpha: sdAlpha,
-                                          bottom: sc, bottomAlpha: scAlpha, font: font))
-        } else {
-            let sdStr = sdPct.map { String(format: "%.0f", $0) } ?? "--"
-            let sdColor = sdPct != nil
-                ? colorForPercent(sdPct ?? 0, alpha: sdAlpha)
-                : NSColor.tertiaryLabelColor
-            result.append(NSAttributedString(string: sdStr, attributes: [.font: font, .foregroundColor: sdColor]))
+        let fhS = str(fhPct, fhAlpha, font)
+        let stacked = showScopedWeekly && sdPct != nil && scPct != nil
+
+        // 5h-window clock state: remaining fraction, or nil = no active
+        // window (plain thin bar instead).
+        var notchRemaining: Double? = nil
+        if fiveHour != nil, let reset = fiveHourReset {
+            let rem = reset.timeIntervalSinceNow / 18000.0
+            if rem > 0 { notchRemaining = rem }
+        }
+
+        // Layout: [pad] 5h digits [cell] right side [pad]
+        let pad: CGFloat = 1.0
+        let cellW: CGFloat = 5.0
+        let topS = str(sdPct, sdAlpha, stacked ? small : font)
+        let botS = stacked ? str(scPct, scAlpha, small) : nil
+        let rightW = max(topS.size().width, botS?.size().width ?? 0)
+        let width = pad + fhS.size().width + cellW + rightW + pad
+        let H = barHeight
+        let sepAlpha = max(fhAlpha, sdAlpha)
+
+        let image = NSImage(size: NSSize(width: width, height: H), flipped: false) { [self] _ in
+            // draw(at:) in an unflipped context takes the line box's
+            // bottom-left, |descender| below the baseline; to put a cap
+            // box at [y, y+capHeight] draw at y + descender.
+            let dY = (H - font.capHeight) / 2   // vertically centered caps
+            fhS.draw(at: NSPoint(x: pad, y: dY + font.descender))
+
+            let cellX = pad + fhS.size().width
+            if let rem = notchRemaining {
+                drawGaugeColumn(x: cellX, cellWidth: cellW, remaining: rem, dim: fhAlpha)
+            } else {
+                NSColor.labelColor.withAlphaComponent(sepAlpha).setFill()
+                NSBezierPath(roundedRect: NSRect(x: cellX + (cellW - 1.1) / 2, y: 1.0,
+                                                 width: 1.1, height: H - 2.0),
+                             xRadius: 0.55, yRadius: 0.55).fill()
+            }
+
+            let rightX = cellX + cellW
+            if stacked, let botS = botS {
+                // Bottom row baseline near the floor, top row cap near the
+                // ceiling — same span as the notch column.
+                let inset: CGFloat = 1.2
+                botS.draw(at: NSPoint(x: rightX, y: inset + small.descender))
+                let topBase = H - inset - small.capHeight
+                topS.draw(at: NSPoint(x: rightX, y: topBase + small.descender))
+            } else {
+                topS.draw(at: NSPoint(x: rightX, y: dY + font.descender))
+            }
+            return true
         }
 
         DispatchQueue.main.async {
-            self.statusItem.button?.attributedTitle = result
+            guard let button = self.statusItem.button else { return }
+            button.attributedTitle = NSAttributedString()
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleNone
         }
     }
 
