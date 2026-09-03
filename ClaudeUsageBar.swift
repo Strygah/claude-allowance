@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var scopedSevenDay: Double?        // model-scoped weekly (today: Fable)
     var scopedSevenDayReset: Date?
     var scopedLabel: String?           // display name from the API payload
+    var scopedFetchedAt: Date?         // last REAL scoped fetch (probe fallback carries old values)
     var lastUpdate: Date?
 
     // Bar shows the scoped weekly only when this is on (menu toggle,
@@ -147,6 +148,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             fiveHour = nil; sevenDay = nil
             fiveHourReset = nil; sevenDayReset = nil
             scopedSevenDay = nil; scopedSevenDayReset = nil; scopedLabel = nil
+            scopedFetchedAt = nil
             lastUpdate = nil
             updateTitle()
             return
@@ -169,6 +171,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             scopedSevenDayReset = nil
         }
+        scopedFetchedAt = (json["scoped_7d_fetched_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
         if let ts = json["timestamp"] as? Double {
             lastUpdate = Date(timeIntervalSince1970: ts)
         }
@@ -183,6 +186,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var isStale: Bool {
         return cacheAge > stalenessThreshold
+    }
+
+    // The scoped weekly can be a carried-over value while the rich endpoint
+    // is down (probe fallback has no scoped bucket), so it has its own
+    // staleness clock, keyed on the last real fetch rather than the cache.
+    var scopedAge: TimeInterval? {
+        return scopedFetchedAt.map { Date().timeIntervalSince($0) }
+    }
+    var scopedStale: Bool {
+        guard let age = scopedAge else { return true }
+        return age > stalenessThreshold
+    }
+
+    func ageString(_ interval: TimeInterval) -> String {
+        let m = Int(interval / 60)
+        if m < 60 { return "\(m)m" }
+        return "\(m / 60)h \(m % 60)m"
     }
 
     // When a window's reset has already passed AND our cached data predates
@@ -268,7 +288,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let (scPct, scProj) = projected(scopedSevenDay, reset: scopedSevenDayReset)
         let fhAlpha: CGFloat = (isStale || fhProj) ? 0.5 : 1.0
         let sdAlpha: CGFloat = (isStale || sdProj) ? 0.5 : 1.0
-        let scAlpha: CGFloat = (isStale || scProj) ? 0.5 : 1.0
+        let scAlpha: CGFloat = (isStale || scProj || scopedStale) ? 0.5 : 1.0
 
         func str(_ pct: Double?, _ alpha: CGFloat, _ f: NSFont) -> NSAttributedString {
             let color = pct != nil
@@ -385,11 +405,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let (scPct, scProj) = projected(scRaw, reset: scopedSevenDayReset)
             let scStr = scPct.map { String(format: "%.1f%%", $0) } ?? "N/A"
             let scItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            let ageNote = scopedStale ? "  (\(ageString(scopedAge ?? 0)) old)" : ""
             scItem.attributedTitle = coloredMenuItem(
-                "7d \(scopedLabel ?? "Fable")  \(scStr)  resets \(timeUntil(scopedSevenDayReset))",
+                "7d \(scopedLabel ?? "Fable")  \(scStr)  resets \(timeUntil(scopedSevenDayReset))\(ageNote)",
                 pct: scPct ?? 0,
                 hasData: scPct != nil,
-                dim: isStale || scProj)
+                dim: isStale || scProj || scopedStale)
             scItem.isEnabled = false
             menu.addItem(scItem)
         }
