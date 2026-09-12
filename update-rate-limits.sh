@@ -114,6 +114,54 @@ run_with_timeout() {
     wait "$pid"
 }
 
+# ---- Codex (OpenAI) ----
+# Read-only: takes the access token the Codex CLI keeps in ~/.codex/auth.json
+# and asks the ChatGPT backend for the subscription windows (primary = 5h,
+# secondary = weekly). Written to its own cache so the Claude writers stay
+# untouched. Never refreshes the token itself: when it expires (401) the
+# cache is marked "expired" and the app tells the user to run `codex login`.
+CODEX_AUTH="${CODEX_HOME:-$HOME/.codex}/auth.json"
+CODEX_CACHE="$HOME/.claude/codex-limits.json"
+fetch_codex() {
+    [[ -f "$CODEX_AUTH" ]] || return 0
+    /usr/bin/python3 - "$CODEX_AUTH" "$CODEX_CACHE" <<'CXEOF' 2>/dev/null
+import json, sys, time, subprocess, os
+auth_path, cache_path = sys.argv[1], sys.argv[2]
+try:
+    a = json.load(open(auth_path)); tok = a["tokens"]["access_token"]; acct = a["tokens"].get("account_id", "")
+except Exception:
+    sys.exit(0)
+prev = {}
+try:
+    prev = json.load(open(cache_path))
+except Exception:
+    pass
+r = subprocess.run(["curl", "-s", "-m", "8", "-w", "\n%{http_code}",
+                    "https://chatgpt.com/backend-api/wham/usage",
+                    "-H", "Authorization: Bearer " + tok, "-H", "ChatGPT-Account-Id: " + acct,
+                    "-H", "User-Agent: codex-cli/0.50.0"], capture_output=True, text=True)
+body, _, status = r.stdout.rpartition("\n"); status = status.strip()
+now = time.time(); out = dict(prev)
+if status == "200":
+    try:
+        d = json.loads(body); rl = d.get("rate_limit") or {}
+        pw = rl.get("primary_window") or {}; sw = rl.get("secondary_window") or {}
+        out = {"five_hour": float(pw.get("used_percent") or 0), "five_hour_reset": float(pw.get("reset_at") or 0),
+               "five_hour_window": int(pw.get("limit_window_seconds") or 18000),
+               "seven_day": float(sw.get("used_percent") or 0), "seven_day_reset": float(sw.get("reset_at") or 0),
+               "plan": d.get("plan_type"), "timestamp": now, "status": "ok"}
+    except Exception:
+        out["status"] = "error"; out["checked_at"] = now
+elif status == "401":
+    out["status"] = "expired"; out["checked_at"] = now
+else:
+    out["status"] = "error"; out["checked_at"] = now
+tmp = cache_path + ".tmp.%d" % os.getpid()
+json.dump(out, open(tmp, "w")); os.replace(tmp, cache_path)
+print(status or "none")
+CXEOF
+}
+
 # GET the dedicated usage endpoint (no inference, costs no quota; returns rich
 # per-model data + exact resets). Needs the user:profile scope, which the
 # keychain token has but the setup-token does NOT. Prints "<body>\n<http_code>";
@@ -250,6 +298,10 @@ if [[ -n "$KC_TOKEN" && -z "$KC_FRESH" && -z "$(find "$REFRESH_STAMP" -mmin -360
 fi
 
 SETUP_TOKEN=$(cat "$SETUP_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
+
+# Codex first: independent of the Claude token state, cheap, same cadence.
+CODEX_HTTP=$(fetch_codex)
+if [[ -n "$CODEX_HTTP" && "$CODEX_HTTP" != "200" ]]; then log "codex usage fetch status=$CODEX_HTTP"; fi
 
 # PRIMARY: the rich, quota-free /api/oauth/usage endpoint. Needs the keychain
 # token's user:profile scope (the setup-token lacks it). Also appends the full

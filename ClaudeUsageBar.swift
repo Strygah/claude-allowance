@@ -11,6 +11,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var scopedSevenDayReset: Date?
     var scopedLabel: String?           // display name from the API payload
     var scopedFetchedAt: Date?         // last REAL scoped fetch (probe fallback carries old values)
+
+    // Codex (OpenAI) subscription windows, from ~/.claude/codex-limits.json.
+    var codexFiveHour: Double?
+    var codexFiveHourReset: Date?
+    var codexWindow: TimeInterval = 18000
+    var codexSevenDay: Double?
+    var codexSevenDayReset: Date?
+    var codexFetchedAt: Date?
+    var codexStatus: String?           // ok | expired | error; nil = no Codex on this Mac
+    let codexCacheFile = NSString(string: "~/.claude/codex-limits.json").expandingTildeInPath
+
+    // Which vendor(s) the bar shows. Default: Claude only. "both" stacks
+    // Claude over Codex as two mini rows.
+    enum BarVendors: String { case claude, codex, both }
+    let barVendorsKey = "BarVendors"
+    var barVendors: BarVendors {
+        BarVendors(rawValue: UserDefaults.standard.string(forKey: barVendorsKey) ?? "claude") ?? .claude
+    }
     var lastUpdate: Date?
 
     // Bar shows the scoped weekly only when this is on (menu toggle,
@@ -144,6 +162,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func readCache() {
         readStatus()
+        readCodexCache()
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: cacheFile)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             fiveHour = nil; sevenDay = nil
@@ -178,6 +197,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         updateTitle()
+    }
+
+    func readCodexCache() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: codexCacheFile)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            codexStatus = nil; codexFiveHour = nil; codexSevenDay = nil
+            codexFiveHourReset = nil; codexSevenDayReset = nil; codexFetchedAt = nil
+            return
+        }
+        codexStatus = json["status"] as? String ?? "ok"
+        codexFiveHour = (json["five_hour"] as? Double).flatMap { $0.isNaN ? nil : $0 }
+        codexSevenDay = (json["seven_day"] as? Double).flatMap { $0.isNaN ? nil : $0 }
+        codexFiveHourReset = (json["five_hour_reset"] as? Double).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+        codexSevenDayReset = (json["seven_day_reset"] as? Double).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+        if let w = json["five_hour_window"] as? Double, w > 0 { codexWindow = w }
+        codexFetchedAt = (json["timestamp"] as? Double).map { Date(timeIntervalSince1970: $0) }
+    }
+
+    var codexStale: Bool {
+        guard codexStatus == "ok", let t = codexFetchedAt else { return true }
+        return Date().timeIntervalSince(t) > stalenessThreshold
     }
 
     var cacheAge: TimeInterval {
@@ -254,34 +294,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Bright fill height = exact remaining fraction of the window (drains
     // downward); the faint track shows the full extent. Whole hours left
     // are still countable as fully-lit segments.
-    func drawGaugeColumn(x: CGFloat, cellWidth: CGFloat, remaining: Double, dim: CGFloat) {
+    func drawGaugeColumn(x: CGFloat, cellWidth: CGFloat, top: CGFloat, height: CGFloat,
+                         segW: CGFloat, remaining: Double, dim: CGFloat) {
         let rem = min(max(remaining, 0), 1)
         let inset: CGFloat = 1.0
-        let usable = barHeight - 2 * inset
-        let gap: CGFloat = 0.9
+        let usable = height - 2 * inset
+        let gap: CGFloat = height >= 18 ? 0.9 : 0.6
         let segH = (usable - 4 * gap) / 5
-        let segW: CGFloat = 2.6
         let segX = x + (cellWidth - segW) / 2
+        let radius = segW * 0.3
         for i in 0..<5 {
-            let y = inset + CGFloat(i) * (segH + gap)
-            // This segment's share of the bottom-anchored global fill
-            // (segments are hours, bottom-up).
+            let y = top + inset + CGFloat(i) * (segH + gap)
             let f = min(max(rem * 5 - Double(i), 0), 1)
             NSColor.labelColor.withAlphaComponent(0.18 * dim).setFill()
             NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH),
-                         xRadius: 0.8, yRadius: 0.8).fill()
+                         xRadius: radius, yRadius: radius).fill()
             if f > 0.01 {
                 NSColor.labelColor.withAlphaComponent(0.95 * dim).setFill()
                 NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH * CGFloat(f)),
-                             xRadius: 0.8, yRadius: 0.8).fill()
+                             xRadius: radius, yRadius: radius).fill()
             }
         }
     }
 
-    func updateTitle() {
-        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
-        let small = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
+    // One vendor's pre-styled numbers plus its 5h clock state.
+    struct VendorRow {
+        var left: NSAttributedString          // 5h percent
+        var right: NSAttributedString         // weekly percent
+        var rightBottom: NSAttributedString?  // stacked second weekly (Fable), Claude-only mode
+        var remaining: Double?                // fraction of the 5h window left; nil = no active window
+        var gaugeDim: CGFloat
+        var sepAlpha: CGFloat
+    }
 
+    func styled(_ pct: Double?, alpha: CGFloat, font: NSFont) -> NSAttributedString {
+        let color = pct != nil ? colorForPercent(pct ?? 0, alpha: alpha) : NSColor.tertiaryLabelColor
+        return NSAttributedString(string: pct.map { String(format: "%.0f", $0) } ?? "--",
+                                  attributes: [.font: font, .foregroundColor: color])
+    }
+
+    func claudeRow(font: NSFont, stacked: Bool) -> VendorRow {
         // Dim per-window when the cache is stale OR the value is a rolled-over
         // projection — both mean "not freshly confirmed".
         let (fhPct, fhProj) = projected(fiveHour, reset: fiveHourReset)
@@ -290,63 +342,101 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fhAlpha: CGFloat = (isStale || fhProj) ? 0.5 : 1.0
         let sdAlpha: CGFloat = (isStale || sdProj) ? 0.5 : 1.0
         let scAlpha: CGFloat = (isStale || scProj || scopedStale) ? 0.5 : 1.0
-
-        func str(_ pct: Double?, _ alpha: CGFloat, _ f: NSFont) -> NSAttributedString {
-            let color = pct != nil
-                ? colorForPercent(pct ?? 0, alpha: alpha)
-                : NSColor.tertiaryLabelColor
-            return NSAttributedString(string: pct.map { String(format: "%.0f", $0) } ?? "--",
-                                      attributes: [.font: f, .foregroundColor: color])
-        }
-
-        let fhS = str(fhPct, fhAlpha, font)
-        let stacked = showScopedWeekly && sdPct != nil && scPct != nil
-
-        // 5h-window clock state: remaining fraction, or nil = no active
-        // window (plain thin bar instead).
-        var notchRemaining: Double? = nil
+        var rem: Double? = nil
         if fiveHour != nil, let reset = fiveHourReset {
-            let rem = reset.timeIntervalSinceNow / 18000.0
-            if rem > 0 { notchRemaining = rem }
+            let r = reset.timeIntervalSinceNow / 18000.0
+            if r > 0 { rem = r }
         }
+        let useStack = stacked && sdPct != nil && scPct != nil
+        return VendorRow(left: styled(fhPct, alpha: fhAlpha, font: font),
+                         right: styled(sdPct, alpha: sdAlpha, font: font),
+                         rightBottom: useStack ? styled(scPct, alpha: scAlpha, font: font) : nil,
+                         remaining: rem, gaugeDim: fhAlpha, sepAlpha: max(fhAlpha, sdAlpha))
+    }
 
-        // Layout: [pad] 5h digits [cell] right side [pad]
+    func codexRow(font: NSFont) -> VendorRow {
+        let now = Date()
+        func proj(_ pct: Double?, _ reset: Date?) -> (Double?, Bool) {
+            guard let p = pct, let r = reset else { return (pct, false) }
+            if (codexFetchedAt ?? Date.distantPast) < r && now > r { return (0, true) }
+            return (p, false)
+        }
+        let (fhPct, fhProj) = proj(codexFiveHour, codexFiveHourReset)
+        let (sdPct, sdProj) = proj(codexSevenDay, codexSevenDayReset)
+        let fhAlpha: CGFloat = (codexStale || fhProj) ? 0.5 : 1.0
+        let sdAlpha: CGFloat = (codexStale || sdProj) ? 0.5 : 1.0
+        var rem: Double? = nil
+        if codexFiveHour != nil, let reset = codexFiveHourReset {
+            let r = reset.timeIntervalSinceNow / codexWindow
+            if r > 0 { rem = r }
+        }
+        return VendorRow(left: styled(fhPct, alpha: fhAlpha, font: font),
+                         right: styled(sdPct, alpha: sdAlpha, font: font), rightBottom: nil,
+                         remaining: rem, gaugeDim: fhAlpha, sepAlpha: max(fhAlpha, sdAlpha))
+    }
+
+    // Draw one row into [top, top+height]: 5h digits, gauge cell, weekly.
+    func drawRow(_ row: VendorRow, x0: CGFloat, top: CGFloat, height: CGFloat,
+                 font: NSFont, cellW: CGFloat, segW: CGFloat) {
+        // draw(at:) in an unflipped context takes the line box's bottom-left,
+        // |descender| below the baseline; to put a cap box at [y, y+capHeight]
+        // draw at y + descender.
+        let dY = top + (height - font.capHeight) / 2
+        row.left.draw(at: NSPoint(x: x0, y: dY + font.descender))
+        let cellX = x0 + row.left.size().width
+        if let rem = row.remaining {
+            drawGaugeColumn(x: cellX, cellWidth: cellW, top: top, height: height,
+                            segW: segW, remaining: rem, dim: row.gaugeDim)
+        } else {
+            let w: CGFloat = segW * 0.42
+            NSColor.labelColor.withAlphaComponent(row.sepAlpha).setFill()
+            NSBezierPath(roundedRect: NSRect(x: cellX + (cellW - w) / 2, y: top + 1.0,
+                                             width: w, height: height - 2.0),
+                         xRadius: w / 2, yRadius: w / 2).fill()
+        }
+        let rightX = cellX + cellW
+        if let bottom = row.rightBottom {
+            let inset: CGFloat = 1.2
+            bottom.draw(at: NSPoint(x: rightX, y: top + inset + font.descender))
+            let topBase = top + height - inset - font.capHeight
+            row.right.draw(at: NSPoint(x: rightX, y: topBase + font.descender))
+        } else {
+            row.right.draw(at: NSPoint(x: rightX, y: dY + font.descender))
+        }
+    }
+
+    func rowWidth(_ row: VendorRow, cellW: CGFloat) -> CGFloat {
+        return row.left.size().width + cellW + max(row.right.size().width, row.rightBottom?.size().width ?? 0)
+    }
+
+    func updateTitle() {
         let pad: CGFloat = 1.0
-        let cellW: CGFloat = 5.0
-        let topS = str(sdPct, sdAlpha, stacked ? small : font)
-        let botS = stacked ? str(scPct, scAlpha, small) : nil
-        let rightW = max(topS.size().width, botS?.size().width ?? 0)
-        let width = pad + fhS.size().width + cellW + rightW + pad
         let H = barHeight
-        let sepAlpha = max(fhAlpha, sdAlpha)
+        var rows: [VendorRow] = []
+        let font: NSFont
+        let cellW: CGFloat
+        let segW: CGFloat
+        switch barVendors {
+        case .claude:
+            font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium); cellW = 5.0; segW = 2.6
+            rows = [claudeRow(font: font, stacked: showScopedWeekly)]
+        case .codex:
+            font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium); cellW = 5.0; segW = 2.6
+            rows = [codexRow(font: font)]
+        case .both:
+            font = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .medium); cellW = 4.4; segW = 2.2
+            rows = [claudeRow(font: font, stacked: false), codexRow(font: font)]
+        }
+        let width = pad + (rows.map { rowWidth($0, cellW: cellW) }.max() ?? 20) + pad
 
         let image = NSImage(size: NSSize(width: width, height: H), flipped: false) { [self] _ in
-            // draw(at:) in an unflipped context takes the line box's
-            // bottom-left, |descender| below the baseline; to put a cap
-            // box at [y, y+capHeight] draw at y + descender.
-            let dY = (H - font.capHeight) / 2   // vertically centered caps
-            fhS.draw(at: NSPoint(x: pad, y: dY + font.descender))
-
-            let cellX = pad + fhS.size().width
-            if let rem = notchRemaining {
-                drawGaugeColumn(x: cellX, cellWidth: cellW, remaining: rem, dim: fhAlpha)
+            if rows.count == 1 {
+                drawRow(rows[0], x0: pad, top: 0, height: H, font: font, cellW: cellW, segW: segW)
             } else {
-                NSColor.labelColor.withAlphaComponent(sepAlpha).setFill()
-                NSBezierPath(roundedRect: NSRect(x: cellX + (cellW - 1.1) / 2, y: 1.0,
-                                                 width: 1.1, height: H - 2.0),
-                             xRadius: 0.55, yRadius: 0.55).fill()
-            }
-
-            let rightX = cellX + cellW
-            if stacked, let botS = botS {
-                // Bottom row baseline near the floor, top row cap near the
-                // ceiling — same span as the notch column.
-                let inset: CGFloat = 1.2
-                botS.draw(at: NSPoint(x: rightX, y: inset + small.descender))
-                let topBase = H - inset - small.capHeight
-                topS.draw(at: NSPoint(x: rightX, y: topBase + small.descender))
-            } else {
-                topS.draw(at: NSPoint(x: rightX, y: dY + font.descender))
+                let gap: CGFloat = 1.2
+                let rh = (H - gap) / 2
+                drawRow(rows[0], x0: pad, top: H - rh, height: rh, font: font, cellW: cellW, segW: segW)  // Claude on top
+                drawRow(rows[1], x0: pad, top: 0, height: rh, font: font, cellW: cellW, segW: segW)       // Codex below
             }
             return true
         }
@@ -377,6 +467,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func buildMenu() {
         let menu = NSMenu()
         menu.delegate = self
+        menu.autoenablesItems = false
 
         let (fhPct, fhProj) = projected(fiveHour, reset: fiveHourReset)
         let fhStr = fhPct.map { String(format: "%.1f%%", $0) } ?? "N/A"
@@ -416,6 +507,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(scItem)
         }
 
+        // Codex rows, whenever a Codex credential exists on this Mac.
+        if codexStatus != nil {
+            let dim = codexStale
+            let cf = codexFiveHour.map { String(format: "%.1f%%", $0) } ?? "N/A"
+            let cfItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            cfItem.attributedTitle = coloredMenuItem(
+                "Codex 5h  \(cf)  resets \(timeUntil(codexFiveHourReset))",
+                pct: codexFiveHour ?? 0, hasData: codexFiveHour != nil, dim: dim)
+            cfItem.isEnabled = false
+            menu.addItem(cfItem)
+            let cs = codexSevenDay.map { String(format: "%.1f%%", $0) } ?? "N/A"
+            let csItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            csItem.attributedTitle = coloredMenuItem(
+                "Codex 7d  \(cs)  resets \(timeUntil(codexSevenDayReset))",
+                pct: codexSevenDay ?? 0, hasData: codexSevenDay != nil, dim: dim)
+            csItem.isEnabled = false
+            menu.addItem(csItem)
+            if codexStatus == "expired" {
+                let hint = NSMenuItem(title: "Codex token expired, run `codex login`", action: nil, keyEquivalent: "")
+                hint.isEnabled = false
+                menu.addItem(hint)
+            }
+        }
+
         menu.addItem(NSMenuItem.separator())
         let updatedText: String
         if let lu = lastUpdate {
@@ -445,6 +560,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.state = showScopedWeekly ? .on : .off
         menu.addItem(toggleItem)
 
+        menu.addItem(NSMenuItem.separator())
+        let choices: [(String, BarVendors)] = [("Bar: Claude", .claude), ("Bar: Codex", .codex), ("Bar: Claude + Codex", .both)]
+        for (title, mode) in choices {
+            let item = NSMenuItem(title: title, action: #selector(setVendors(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = barVendors == mode ? .on : .off
+            item.isEnabled = mode == .claude || codexStatus != nil
+            menu.addItem(item)
+        }
+
         let refreshItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
@@ -467,6 +593,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
             .foregroundColor: color
         ])
+    }
+
+    @objc func setVendors(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String {
+            UserDefaults.standard.set(raw, forKey: barVendorsKey)
+        }
+        buildMenu()
+        updateTitle()
     }
 
     @objc func toggleScopedWeekly() {

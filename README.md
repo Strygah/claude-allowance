@@ -19,6 +19,7 @@ In the wild, actual size:
 - 5h and 7d utilization percentages, colored green → red
 - Time gauge notched into 5 hour-segments: the bright fill is the exact time remaining in your current 5h window, draining in real time
 - Optional third number: your model-scoped (Fable) weekly allowance
+- Optional OpenAI Codex lane: the bar can show Claude, Codex, or both stacked (menu: **Bar: Claude / Codex / Claude + Codex**); Codex 5h and weekly windows appear in the dropdown whenever a Codex CLI login exists on the Mac
 - Dropdown with exact percentages and reset countdowns
 - Dims when data is stale; projects a rolled-over window to 0% instead of showing ghosts
 - Primary data source costs **zero quota**; a 1-token probe keeps the bar alive as a fallback
@@ -70,6 +71,10 @@ Optional resilience: `./provision-setup-token.sh` provisions a ~1-year token (vi
 Max plans carry a model-scoped weekly limit alongside the all-models one (currently scoped to Fable). The rich usage endpoint exposes it; the bar can show it as a third number, toggled via the menu item **Show Fable weekly** (off by default). The dropdown row appears whenever the data exists, regardless of the toggle.
 
 Scoped data comes only from the primary endpoint (keychain token). On probe-fallback data it is carried for up to 6h from its last real fetch, then ages out and the bar reverts to two numbers.
+
+### Codex (optional)
+
+If the Codex CLI is logged in on this Mac (`~/.codex/auth.json` exists), the updater also reads the ChatGPT subscription windows (5h primary, weekly secondary) into `~/.claude/codex-limits.json`, read-only, on the same cadence. The dropdown shows them; the **Bar:** menu picks what the bar renders: Claude only (default), Codex only, or both stacked as two mini rows (Claude on top). The Fable stack is a Claude-only-mode feature. The updater never refreshes the Codex token; when it expires the rows dim and the menu says `run codex login`.
 
 ## Architecture
 
