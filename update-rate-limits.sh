@@ -37,6 +37,20 @@ EXPIRY_BUFFER_MS=60000   # treat the token as expired this long before its real 
 # Caller can set LAUNCH_SRC=app|agent|manual to tag who invoked us.
 LAUNCH_SRC="${LAUNCH_SRC:-manual}"
 
+# FETCH CADENCE. The usage endpoint is documented as safe to poll at ~180s
+# with the claude-code User-Agent (faster polling risks a 429 bucket), and
+# the fallback probe is a real inference request, so both are rate-limited
+# to one fetch per MIN_INTERVAL seconds, keyed on the cache file's mtime.
+# The LaunchAgent and the app may still invoke us every minute; those runs
+# exit here at near-zero cost. FORCE=1 (the app's "Refresh now") bypasses.
+MIN_INTERVAL="${MIN_INTERVAL:-180}"
+if [[ "${FORCE:-0}" != "1" && -f "$CACHE" ]]; then
+    AGE=$(( $(date +%s) - $(stat -f %m "$CACHE" 2>/dev/null || echo 0) ))
+    if (( AGE < MIN_INTERVAL )); then
+        exit 0
+    fi
+fi
+
 # One line per run so a recurring staleness has a paper trail. Capped to the
 # last 500 lines so it can't grow unbounded.
 log() {

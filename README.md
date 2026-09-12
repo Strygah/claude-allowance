@@ -6,7 +6,7 @@
 
 Always-visible Claude allowances: **5h session usage**, **weekly usage**, and a notched gauge showing **exactly how much of your 5-hour window is left**.
 
-If your work runs on Claude (Claude Code, Desktop, claude.ai) on a Pro/Max subscription, the limits are invisible until you slam into one mid-task. This keeps them one glance away, updated every minute, whether or not any Claude client is running.
+If your work runs on Claude (Claude Code, Desktop, claude.ai) on a Pro/Max subscription, the limits are invisible until you slam into one mid-task. This keeps them one glance away, refreshed every three minutes (the gauge itself ticks live), whether or not any Claude client is running.
 
 In the wild, actual size:
 
@@ -44,7 +44,7 @@ The install location must be `~/.claude/usage-bar` — the app and updater refer
 
 | Agent | Job |
 |---|---|
-| `com.claude.usage-bar` | Runs the updater every 60s, keeps `~/.claude/rate-limits.json` fresh even when no Claude client is open |
+| `com.claude.usage-bar` | Runs the updater every 60s (it fetches at most once per 180s, the documented safe polling rate; "Refresh now" bypasses that), keeping `~/.claude/rate-limits.json` fresh even when no Claude client is open |
 | `com.claude.usage-bar.app` | Starts the menu bar app at login, relaunches it on crash (a clean Quit is honored) |
 
 If the bar shows `--|--`: sign in once with `claude` in a terminal, then click the item → **Refresh now**.
@@ -110,7 +110,7 @@ Both 200 and 429 responses carry these headers (a 429 reports the exhausted wind
 
 ## Disclaimer
 
-Not affiliated with or endorsed by Anthropic. This tool reads **unofficial endpoints and headers** observed from official clients; Anthropic may change or remove them at any time, at which point the bar dims until the tool is updated. It never writes to your keychain and never calls the OAuth endpoint itself — it only reads what official clients maintain, and delegates token rotation to the official `claude` CLI (see Data sources).
+Not affiliated with or endorsed by Anthropic. This tool reads **unofficial endpoints and headers** observed from official clients; Anthropic may change or remove them at any time, at which point the bar dims until the tool is updated. It only *reads usage*: it never routes inference through your subscription, never offers a Claude login of its own, and delegates all authentication and token rotation to the official `claude` CLI, which is how it stays inside Anthropic's [credential-use policy](https://code.claude.com/docs/en/legal-and-compliance). It never writes to your keychain and never calls the OAuth endpoint itself — it only reads what official clients maintain, and delegates token rotation to the official `claude` CLI (see Data sources).
 
 ## Known limits
 

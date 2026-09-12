@@ -24,7 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusFile = NSString(string: "~/.claude/rate-limits-status.json").expandingTildeInPath
     let updaterScript = NSString(string: "~/.claude/usage-bar/update-rate-limits.sh").expandingTildeInPath
     let stalenessThreshold: TimeInterval = 300 // 5 min — when to dim + label "(stale)"
-    let refreshInterval: TimeInterval = 45     // trigger a fetch once the cache is older than this
+    let refreshInterval: TimeInterval = 170    // spawn the updater once the cache is older than this (its own cadence gate is 180s)
     var updaterRunning = false                 // guard against overlapping spawns
     var updaterStartedAt: Date?                // for the wedge watchdog below
 
@@ -85,7 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // /usr/bin/security (Apple-signed, trusted in the item's ACL), so it
     // stays silent even though this parent app is only ad-hoc signed — the
     // keychain call is attributed to security, not to us.
-    func runUpdater() {
+    func runUpdater(force: Bool = false) {
         // Wedge watchdog: a previous spawn can leave updaterRunning stuck true
         // if its terminationHandler is never delivered (the main queue can
         // stall when the system suspends the app). A real run finishes in a few
@@ -103,6 +103,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         task.arguments = [updaterScript]
         var env = ProcessInfo.processInfo.environment
         env["LAUNCH_SRC"] = "app"
+        if force { env["FORCE"] = "1" }   // "Refresh now" bypasses the fetch cadence
         task.environment = env
         task.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
@@ -478,7 +479,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Force an immediate fetch regardless of cache age. Reset the watchdog
         // flag first so a (rare) wedged spawn can't swallow the manual press.
         updaterRunning = false
-        runUpdater()
+        runUpdater(force: true)
     }
 
     @objc func openUsage() {
