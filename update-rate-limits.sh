@@ -17,7 +17,10 @@
 #
 # SAFETY: this script NEVER calls an OAuth refresh endpoint and NEVER writes to
 # the keychain. It only READS it (silently, via /usr/bin/security), so it can
-# never rotate or invalidate the shared login credential.
+# never rotate or invalidate the shared login credential. When the access
+# token has expired it may run the OFFICIAL `claude` CLI headlessly once per
+# 6h so that the CLI rotates its own token the sanctioned way (see
+# AUTO-REFRESH below) — the same thing that happens when you open a terminal.
 #
 # If no usable token exists (keychain expired AND no setup-token), the script
 # records status=token_expired and leaves the last-good cache untouched so the
@@ -66,6 +69,35 @@ try:
 except Exception:
     pass
 " 2>/dev/null
+}
+
+# Refresh-token state from the same keychain item: "<refreshTokenExpiresAt_ms>\t<1|0>".
+read_refresh_state() {
+    security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | \
+        /usr/bin/python3 -c "
+import sys, json
+try:
+    o = json.loads(sys.stdin.read())['claudeAiOauth']
+    print('%s\t%s' % (o.get('refreshTokenExpiresAt', ''), 1 if o.get('refreshToken') else 0))
+except Exception:
+    pass
+" 2>/dev/null
+}
+
+# Run a command with a hard wall-clock cap (macOS has no coreutils timeout).
+run_with_timeout() {
+    local secs="$1"; shift
+    "$@" </dev/null >/dev/null 2>&1 &
+    local pid=$! waited=0
+    while kill -0 "$pid" 2>/dev/null && (( waited < secs )); do
+        sleep 1; waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        return 124
+    fi
+    wait "$pid"
 }
 
 # GET the dedicated usage endpoint (no inference, costs no quota; returns rich
@@ -145,16 +177,62 @@ HELPER="$HOME/.claude/usage-bar/usage-to-cache.py"
 SETUP_TOKEN_FILE="$HOME/.claude/usage-bar/setup-token"
 
 # Read the keychain token + validated expiresAt, and decide if it's fresh.
-KC=$(read_keychain)
-KC_TOKEN="${KC%%$'\t'*}"
-KC_EXP="${KC#*$'\t'}"
-[[ "$KC_EXP" =~ ^[1-9][0-9]{12,}$ ]] || KC_EXP=""
-KC_FRESH=""
-if [[ -n "$KC_TOKEN" && -n "$KC_EXP" ]]; then
-    NOW_MS="${TEST_NOW_MS:-$(/usr/bin/python3 -c 'import time; print(int(time.time()*1000))')}"
-    /usr/bin/python3 -c "import sys; sys.exit(0 if ${NOW_MS} < ${KC_EXP} - ${EXPIRY_BUFFER_MS} else 1)" 2>/dev/null && KC_FRESH=1
-elif [[ -n "$KC_TOKEN" ]]; then
-    KC_FRESH=1   # expiresAt unknown: treat as usable, let the API be the judge
+NOW_MS="${TEST_NOW_MS:-$(/usr/bin/python3 -c 'import time; print(int(time.time()*1000))')}"
+load_keychain() {
+    KC=$(read_keychain)
+    KC_TOKEN="${KC%%$'\t'*}"
+    KC_EXP="${KC#*$'\t'}"
+    [[ "$KC_EXP" =~ ^[1-9][0-9]{12,}$ ]] || KC_EXP=""
+    KC_FRESH=""
+    if [[ -n "$KC_TOKEN" && -n "$KC_EXP" ]]; then
+        /usr/bin/python3 -c "import sys; sys.exit(0 if ${NOW_MS} < ${KC_EXP} - ${EXPIRY_BUFFER_MS} else 1)" 2>/dev/null && KC_FRESH=1
+    elif [[ -n "$KC_TOKEN" ]]; then
+        KC_FRESH=1   # expiresAt unknown: treat as usable, let the API be the judge
+    fi
+}
+load_keychain
+
+# AUTO-REFRESH. The access token lives ~8h and only the official CLI rotates
+# it, so desktop-app-only days used to leave the rich endpoint (and the
+# scoped Fable weekly) dead until the next terminal session. If the token is
+# expired but the refresh token is still valid, run the CLI headlessly once
+# (haiku, one turn, ~5s, negligible quota) and let it rotate the token
+# exactly as an interactive `claude` launch would. This script itself still
+# never touches the OAuth endpoint or writes the keychain. One attempt per
+# 6h (stamp file) so a failing CLI can't loop every minute.
+REFRESH_STAMP="$HOME/.claude/usage-bar/.refresh-attempt"
+if [[ -n "$KC_TOKEN" && -z "$KC_FRESH" && -z "$(find "$REFRESH_STAMP" -mmin -360 2>/dev/null)" ]]; then
+    RS=$(read_refresh_state)
+    R_EXP="${RS%%$'\t'*}"; R_HAS="${RS#*$'\t'}"
+    [[ "$R_EXP" =~ ^[1-9][0-9]{12,}$ ]] || R_EXP=""
+    R_OK=""
+    if [[ "$R_HAS" == "1" ]]; then
+        if [[ -z "$R_EXP" ]]; then
+            R_OK=1
+        else
+            /usr/bin/python3 -c "import sys; sys.exit(0 if ${NOW_MS} < ${R_EXP} else 1)" 2>/dev/null && R_OK=1
+        fi
+    fi
+    CLAUDE_BIN=""
+    for c in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+        [[ -x "$c" ]] && { CLAUDE_BIN="$c"; break; }
+    done
+    touch "$REFRESH_STAMP"
+    if [[ -z "$R_OK" ]]; then
+        log "token expired and refresh token missing/expired - run \`claude\` in a terminal to sign in again"
+    elif [[ -z "$CLAUDE_BIN" ]]; then
+        log "token expired but no claude CLI found for headless refresh"
+    else
+        if run_with_timeout 90 env -i HOME="$HOME" USER="${USER:-$(id -un)}" \
+                PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin" \
+                "$CLAUDE_BIN" -p "reply with the single word ok" \
+                --model claude-haiku-4-5-20251001 --max-turns 1; then
+            load_keychain
+            log "headless claude refreshed the keychain token (fresh=${KC_FRESH:-0})"
+        else
+            log "headless claude refresh failed (rc=$?) - will retry in 6h"
+        fi
+    fi
 fi
 
 SETUP_TOKEN=$(cat "$SETUP_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')

@@ -18,5 +18,6 @@ ClaudeUsageBar.app/
 # macOS junk
 .DS_Store
 
-# Runtime log
+# Runtime log + auto-refresh cooldown stamp
 updater.log
+.refresh-attempt
