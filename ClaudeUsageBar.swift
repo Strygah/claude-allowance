@@ -290,12 +290,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // drawing closure per draw so labelColor keeps adapting to light/dark.
     let barHeight: CGFloat = 22   // fits every menu bar (min thickness 24)
 
+    // Two-vendor mode: each vendor's full-height gauge is identified by its
+    // tint (clay = Claude, mint = Codex); digits keep the usage ramp.
+    // Dynamic colors so light and dark menu bars each get a readable shade.
+    let claudeTint = NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.94, green: 0.67, blue: 0.55, alpha: 1)
+            : NSColor(red: 0.76, green: 0.38, blue: 0.26, alpha: 1)
+    }
+    let codexTint = NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.59, green: 0.92, blue: 0.80, alpha: 1)
+            : NSColor(red: 0.06, green: 0.52, blue: 0.40, alpha: 1)
+    }
+    let twinSegW: CGFloat = 2.6
+    let twinGap: CGFloat = 1.4
+    let twinCellW: CGFloat = 2.6 * 2 + 1.4 + 2 * 1.2
+
     // Continuous 5h gauge, notched into 5 hour segments by thin gaps.
     // Bright fill height = exact remaining fraction of the window (drains
     // downward); the faint track shows the full extent. Whole hours left
     // are still countable as fully-lit segments.
     func drawGaugeColumn(x: CGFloat, cellWidth: CGFloat, top: CGFloat, height: CGFloat,
-                         segW: CGFloat, remaining: Double, dim: CGFloat) {
+                         segW: CGFloat, remaining: Double, dim: CGFloat,
+                         color: NSColor = NSColor.labelColor, trackAlpha: CGFloat = 0.18) {
         let rem = min(max(remaining, 0), 1)
         let inset: CGFloat = 1.0
         let usable = height - 2 * inset
@@ -306,11 +324,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for i in 0..<5 {
             let y = top + inset + CGFloat(i) * (segH + gap)
             let f = min(max(rem * 5 - Double(i), 0), 1)
-            NSColor.labelColor.withAlphaComponent(0.18 * dim).setFill()
+            color.withAlphaComponent(trackAlpha * dim).setFill()
             NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH),
                          xRadius: radius, yRadius: radius).fill()
             if f > 0.01 {
-                NSColor.labelColor.withAlphaComponent(0.95 * dim).setFill()
+                color.withAlphaComponent(0.95 * dim).setFill()
                 NSBezierPath(roundedRect: NSRect(x: segX, y: y, width: segW, height: segH * CGFloat(f)),
                              xRadius: radius, yRadius: radius).fill()
             }
@@ -409,6 +427,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return row.left.size().width + cellW + max(row.right.size().width, row.rightBottom?.size().width ?? 0)
     }
 
+    // Two-vendor layout: 5h column (Claude over Codex), a shared cell holding
+    // both full-height gauges side by side (Claude left, Codex right), then
+    // the weekly column. Digits right-align to the cell so both rows share
+    // the same column edges.
+    func stackedWidth(_ rows: [VendorRow]) -> CGFloat {
+        let leftW = rows.map { $0.left.size().width }.max() ?? 0
+        let rightW = rows.map { $0.right.size().width }.max() ?? 0
+        return leftW + twinCellW + rightW
+    }
+
+    func drawStacked(_ rows: [VendorRow], x0: CGFloat, H: CGFloat, font: NSFont, tints: [NSColor]) {
+        let gap: CGFloat = 1.2
+        let rh = (H - gap) / 2
+        let leftW = rows.map { $0.left.size().width }.max() ?? 0
+        let cellX = x0 + leftW
+        let rightX = cellX + twinCellW
+        for (i, row) in rows.enumerated() {
+            let top = i == 0 ? H - rh : 0     // first row (Claude) on top
+            let dY = top + (rh - font.capHeight) / 2
+            row.left.draw(at: NSPoint(x: cellX - row.left.size().width, y: dY + font.descender))
+            row.right.draw(at: NSPoint(x: rightX, y: dY + font.descender))
+            let gx = cellX + 1.2 + CGFloat(i) * (twinSegW + twinGap)
+            let tint = tints[min(i, tints.count - 1)]
+            if let rem = row.remaining {
+                drawGaugeColumn(x: gx, cellWidth: twinSegW, top: 0, height: H, segW: twinSegW,
+                                remaining: rem, dim: row.gaugeDim, color: tint, trackAlpha: 0.24)
+            } else {
+                let w = twinSegW * 0.42
+                tint.withAlphaComponent(row.sepAlpha).setFill()
+                NSBezierPath(roundedRect: NSRect(x: gx + (twinSegW - w) / 2, y: 1.0, width: w, height: H - 2.0),
+                             xRadius: w / 2, yRadius: w / 2).fill()
+            }
+        }
+    }
+
     func updateTitle() {
         let pad: CGFloat = 1.0
         let H = barHeight
@@ -424,22 +477,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium); cellW = 5.0; segW = 2.6
             rows = [codexRow(font: font)]
         case .both:
-            font = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .medium); cellW = 4.4; segW = 2.2
+            font = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .medium); cellW = twinCellW; segW = twinSegW
             rows = [claudeRow(font: font, stacked: false), codexRow(font: font)]
         }
-        let width = pad + (rows.map { rowWidth($0, cellW: cellW) }.max() ?? 20) + pad
+        let width = rows.count == 1
+            ? pad + rowWidth(rows[0], cellW: cellW) + pad
+            : pad + stackedWidth(rows) + pad
 
         let image = NSImage(size: NSSize(width: width, height: H), flipped: false) { [self] _ in
             if rows.count == 1 {
                 drawRow(rows[0], x0: pad, top: 0, height: H, font: font, cellW: cellW, segW: segW)
             } else {
-                let gap: CGFloat = 1.2
-                let rh = (H - gap) / 2
-                drawRow(rows[0], x0: pad, top: H - rh, height: rh, font: font, cellW: cellW, segW: segW)  // Claude on top
-                drawRow(rows[1], x0: pad, top: 0, height: rh, font: font, cellW: cellW, segW: segW)       // Codex below
+                drawStacked(rows, x0: pad, H: H, font: font, tints: [claudeTint, codexTint])
             }
             return true
         }
+
+        // Hover tooltip names both vendors in every mode (the bar itself
+        // only has to survive the glance).
+        func tip(_ name: String, _ fh: Double?, _ fhReset: Date?, _ sd: Double?, _ sdReset: Date?) -> String {
+            let f = fh.map { String(format: "%.0f%%", $0) } ?? "--"
+            let w = sd.map { String(format: "%.0f%%", $0) } ?? "--"
+            return "\(name): 5h \(f), resets \(timeUntil(fhReset)) · 7d \(w), resets \(timeUntil(sdReset))"
+        }
+        var tips = [tip("Claude", fiveHour, fiveHourReset, sevenDay, sevenDayReset)]
+        if codexStatus != nil {
+            tips.append(tip("Codex", codexFiveHour, codexFiveHourReset, codexSevenDay, codexSevenDayReset))
+        }
+        let tooltip = tips.joined(separator: "\n")
 
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
@@ -447,6 +512,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = image
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleNone
+            button.toolTip = tooltip
         }
     }
 

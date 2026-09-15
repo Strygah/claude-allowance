@@ -74,7 +74,7 @@ Scoped data comes only from the primary endpoint (keychain token). On probe-fall
 
 ### Codex (optional)
 
-If the Codex CLI is logged in on this Mac (`~/.codex/auth.json` exists), the updater also reads the ChatGPT subscription windows (5h primary, weekly secondary) into `~/.claude/codex-limits.json`, read-only, on the same cadence. The dropdown shows them; the **Bar:** menu picks what the bar renders: Claude only (default), Codex only, or both stacked as two mini rows (Claude on top). The Fable stack is a Claude-only-mode feature. The updater never refreshes the Codex token; when it expires the rows dim and the menu says `run codex login`.
+If the Codex CLI is logged in on this Mac (`~/.codex/auth.json` exists), the updater also reads the ChatGPT subscription windows (5h primary, weekly secondary) into `~/.claude/codex-limits.json`, read-only, on the same cadence. The dropdown shows them; the **Bar:** menu picks what the bar renders: Claude only (default), Codex only, or both stacked. In the stacked mode the two rows share the middle cell, which holds both full-height 5h gauges side by side, identified by tint: **clay = Claude, mint = Codex** (digits keep the green-to-red usage ramp). Hovering the item shows a tooltip naming both vendors. The Fable stack is a Claude-only-mode feature. The updater never refreshes the Codex token; when it expires the rows dim and the menu says `run codex login`.
 
 ## Architecture
 
