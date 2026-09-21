@@ -18,9 +18,10 @@
 # SAFETY: this script NEVER calls an OAuth refresh endpoint and NEVER writes to
 # the keychain. It only READS it (silently, via /usr/bin/security), so it can
 # never rotate or invalidate the shared login credential. When the access
-# token has expired it may run the OFFICIAL `claude` CLI headlessly once per
-# 6h so that the CLI rotates its own token the sanctioned way (see
-# AUTO-REFRESH below) — the same thing that happens when you open a terminal.
+# token has expired it may run the OFFICIAL `claude` CLI headlessly (a usage
+# query over its control channel, no model turn) so that the CLI rotates its
+# own token the sanctioned way (see AUTO-REFRESH below), the same thing that
+# happens when you open a terminal.
 #
 # If no usable token exists (keychain expired AND no setup-token), the script
 # records status=token_expired and leaves the last-good cache untouched so the
@@ -236,6 +237,9 @@ SIG="$HOME/.claude/usage-bar/.usage-sig"
 WINDOWS="$HOME/.claude/usage-bar/usage-windows.jsonl"
 WINSIG="$HOME/.claude/usage-bar/.5h-reset"
 HELPER="$HOME/.claude/usage-bar/usage-to-cache.py"
+RPC_HELPER="$HOME/.claude/usage-bar/claude-usage-rpc.py"
+REFRESH_CWD="$HOME/.claude/usage-bar/.refresh-cwd"   # empty dir the headless CLI starts in
+RPC_BODY=""   # usage payload from a headless CLI run this invocation, if any
 SETUP_TOKEN_FILE="$HOME/.claude/usage-bar/setup-token"
 
 # Read the keychain token + validated expiresAt, and decide if it's fresh.
@@ -257,11 +261,16 @@ load_keychain
 # AUTO-REFRESH. The access token lives ~8h and only the official CLI rotates
 # it, so desktop-app-only days used to leave the rich endpoint (and the
 # scoped Fable weekly) dead until the next terminal session. If the token is
-# expired but the refresh token is still valid, run the CLI headlessly once
-# (haiku, one turn, ~5s, negligible quota) and let it rotate the token
-# exactly as an interactive `claude` launch would. This script itself still
-# never touches the OAuth endpoint or writes the keychain. One attempt per
-# 6h (stamp file) so a failing CLI can't loop every minute.
+# expired but the refresh token is still valid, start the CLI headlessly and
+# ask it for usage over its control channel (claude-usage-rpc.py: no model
+# turn, zero quota, ~2s); it rotates the token on the way in exactly as an
+# interactive `claude` launch would, and its answer doubles as this run's
+# data. The CLI is started from an EMPTY directory: it scans its working tree
+# at startup, and inheriting the app's launchd cwd (`/`) sent that scan into
+# Downloads, the Music/TV library and network volumes, each a macOS consent
+# dialog attributed to the app. This script itself still never touches the
+# OAuth endpoint or writes the keychain. One attempt per 6h (stamp file) so
+# a failing CLI can't loop every minute.
 REFRESH_STAMP="$HOME/.claude/usage-bar/.refresh-attempt"
 if [[ -n "$KC_TOKEN" && -z "$KC_FRESH" && -z "$(find "$REFRESH_STAMP" -mmin -360 2>/dev/null)" ]]; then
     RS=$(read_refresh_state)
@@ -285,12 +294,21 @@ if [[ -n "$KC_TOKEN" && -z "$KC_FRESH" && -z "$(find "$REFRESH_STAMP" -mmin -360
     elif [[ -z "$CLAUDE_BIN" ]]; then
         log "token expired but no claude CLI found for headless refresh"
     else
-        if run_with_timeout 90 env -i HOME="$HOME" USER="${USER:-$(id -un)}" \
-                PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin" \
-                "$CLAUDE_BIN" -p "reply with the single word ok" \
-                --model claude-haiku-4-5-20251001 --max-turns 1; then
+        mkdir -p "$REFRESH_CWD"
+        RPC_BODY=$(/usr/bin/python3 "$RPC_HELPER" "$CLAUDE_BIN" "$REFRESH_CWD" 2>/dev/null)
+        if [[ -n "$RPC_BODY" ]]; then
             load_keychain
-            log "headless claude refreshed the keychain token (fresh=${KC_FRESH:-0})"
+            log "headless usage request refreshed the keychain token (fresh=${KC_FRESH:-0})"
+            # Answered, yet the keychain still reads as expiring: the CLI saw
+            # the token as valid and left it alone. Retry in 10 min, not 6h.
+            [[ -z "$KC_FRESH" ]] && touch -A -055000 "$REFRESH_STAMP"
+        elif (cd "$REFRESH_CWD" && run_with_timeout 90 env -i HOME="$HOME" USER="${USER:-$(id -un)}" \
+                PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin" \
+                "$CLAUDE_BIN" -p "reply with the single word ok" --model "$MODEL" --max-turns 1); then
+            # Control channel unavailable (Anthropic marks it experimental): a
+            # one-turn Haiku call still makes the CLI rotate its token.
+            load_keychain
+            log "usage request unavailable; headless claude turn refreshed the keychain token (fresh=${KC_FRESH:-0})"
         else
             log "headless claude refresh failed (rc=$?) - will retry in 6h"
         fi
@@ -303,25 +321,31 @@ SETUP_TOKEN=$(cat "$SETUP_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
 CODEX_HTTP=$(fetch_codex)
 if [[ -n "$CODEX_HTTP" && "$CODEX_HTTP" != "200" ]]; then log "codex usage fetch status=$CODEX_HTTP"; fi
 
-# PRIMARY: the rich, quota-free /api/oauth/usage endpoint. Needs the keychain
-# token's user:profile scope (the setup-token lacks it). Also appends the full
-# per-model payload to the deduped history for periodic analysis. The indicator
-# cache schema is unchanged, so the menu bar looks identical.
+# PRIMARY: the rich, quota-free /api/oauth/usage payload. Either the answer
+# the headless CLI just gave (RPC_BODY) or a direct GET with the keychain
+# token (needs its user:profile scope; the setup-token lacks it). Also
+# appends the full per-model payload to the deduped history for periodic
+# analysis. The indicator cache schema is unchanged, so the menu bar looks
+# identical. Exits the script on success.
+use_usage_body() {
+    local body="$1" src="$2" OUT
+    OUT=$(CACHE="$CACHE" HISTORY="$HISTORY" SIG="$SIG" WINDOWS="$WINDOWS" WINSIG="$WINSIG" /usr/bin/python3 "$HELPER" <<<"$body" 2>/dev/null) || return 1
+    [[ -n "$OUT" ]] || return 1
+    write_status "ok" ""
+    log "OK [$src] 5h=${OUT% *}% 7d=${OUT#* }%"
+    if [[ $(wc -l < "$HISTORY" 2>/dev/null || echo 0) -gt 100000 ]]; then
+        tail -n 90000 "$HISTORY" > "$HISTORY.$$" && mv "$HISTORY.$$" "$HISTORY"
+    fi
+    exit 0
+}
+if [[ -n "$RPC_BODY" ]]; then
+    use_usage_body "$RPC_BODY" "usage:cli" || log "headless usage payload unparseable, trying the endpoint"
+fi
 if [[ -n "$KC_FRESH" ]]; then
     RESP=$(fetch_usage "$KC_TOKEN")
     USAGE_STATUS="${RESP##*$'\n'}"   # split in the parent shell (not the subshell)
     BODY="${RESP%$'\n'*}"
-    if [[ "$USAGE_STATUS" == "200" ]]; then
-        OUT=$(CACHE="$CACHE" HISTORY="$HISTORY" SIG="$SIG" WINDOWS="$WINDOWS" WINSIG="$WINSIG" /usr/bin/python3 "$HELPER" <<<"$BODY" 2>/dev/null)
-        if [[ -n "$OUT" ]]; then
-            write_status "ok" ""
-            log "OK [usage] 5h=${OUT% *}% 7d=${OUT#* }%"
-            if [[ $(wc -l < "$HISTORY" 2>/dev/null || echo 0) -gt 100000 ]]; then
-                tail -n 90000 "$HISTORY" > "$HISTORY.$$" && mv "$HISTORY.$$" "$HISTORY"
-            fi
-            exit 0
-        fi
-    fi
+    [[ "$USAGE_STATUS" == "200" ]] && use_usage_body "$BODY" "usage"
     log "usage endpoint unavailable (status=${USAGE_STATUS:-none}), falling back to probe"
 fi
 

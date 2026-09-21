@@ -84,6 +84,7 @@ Two pieces plus two LaunchAgents:
 |-------|--------------|--------------|
 | `update-rate-limits.sh` | Every 60s (LaunchAgent) + on demand from the app | Fetches usage data (see Data sources) and writes `~/.claude/rate-limits.json`. Never calls an OAuth refresh endpoint, never writes the keychain. |
 | `usage-to-cache.py` | Called by the updater | Parses the rich usage payload into the cache (incl. the scoped weekly) and appends a deduped history for your own analysis. |
+| `claude-usage-rpc.py` | Called by the updater when the keychain token has expired | Starts the official CLI headlessly from an empty directory and asks it for usage over its control channel, so the CLI rotates its own token (no model turn, no quota, no consent dialogs). |
 | `ClaudeUsageBar.swift` | Always (menu bar app) | Pure UI: reads the cache every 15s and on menu open. No network, no keychain. Renders the whole item as one 22pt image (text attachments clip at the font's line box). |
 | `restart.sh` | Dev loop | Rebuild + relaunch through launchd (`kickstart`), converging to exactly one instance — replacing a running app's binary can trip Gatekeeper's stale-signature kill and launchd's KeepAlive relaunch race. |
 
@@ -96,7 +97,7 @@ macOS periodically re-attests ad-hoc-signed apps that read OAuth-class keychain 
 Priority order in the updater:
 
 1. **`GET /api/oauth/usage`** with the keychain OAuth token (needs the `user:profile` scope). A pure usage query: costs **no quota** and returns rich data — exact utilizations, ISO reset times, per-model weekly buckets. Requires a `User-Agent: claude-code/<ver>` prefix or the endpoint 429s.
-**Token auto-refresh:** the keychain access token lives ~8h and is normally rotated only when you use the Claude Code CLI, so desktop-app-only days would leave source 1 dead. When the updater finds it expired (with a valid refresh token), it runs the official CLI headlessly once per 6h (`claude -p`, Haiku, one turn, ~5s) and lets the CLI rotate its own token, the same thing an interactive `claude` launch does. The updater itself never calls the OAuth endpoint or writes the keychain. Needs the CLI at `~/.local/bin/claude` (the native installer's location) or Homebrew's bin.
+**Token auto-refresh:** the keychain access token lives ~8h and is normally rotated only when you use the Claude Code CLI, so desktop-app-only days would leave source 1 dead. When the updater finds it expired (with a valid refresh token), it starts the official CLI headlessly once per 6h and asks it for usage over its control channel (`claude-usage-rpc.py`: a `get_usage` request, no model turn, zero quota, ~2s). The CLI rotates its own token on the way in, the same thing an interactive `claude` launch does, and its answer doubles as that run's data. The CLI is started from an empty directory on purpose: it scans its working tree at startup, and inheriting the app's launchd working directory (`/`) would send that scan into Downloads, the Music/TV library and network volumes, each of which is a macOS consent dialog attributed to the app. If the control channel ever changes (Anthropic marks it experimental), the updater falls back to a one-turn Haiku call from the same directory. The updater itself never calls the OAuth endpoint or writes the keychain. Needs the CLI at `~/.local/bin/claude` (the native installer's location) or Homebrew's bin.
 
 2. **Fallback probe:** a `max_tokens: 1` call to `/v1/messages`, reading the `anthropic-ratelimit-unified-*` response headers. Works with a long-lived `claude setup-token` (which lacks the scope for source 1). Costs 1 output token per minute against the very limit it measures — negligible, but real.
 
@@ -132,6 +133,7 @@ Not affiliated with or endorsed by Anthropic. This tool reads **unofficial endpo
 - `restart.sh` — rebuild + relaunch for development
 - `update-rate-limits.sh` — data fetcher (keychain via `/usr/bin/security`)
 - `usage-to-cache.py` — rich-payload parser + local usage history
+- `claude-usage-rpc.py` — headless usage request to the official CLI (token rotation without a model turn)
 - `provision-setup-token.sh` — optional ~1-year fallback token
 - `setup-token-test.sh` — diagnostic comparing token sources
 

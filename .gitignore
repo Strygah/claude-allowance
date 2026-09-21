@@ -18,6 +18,10 @@ ClaudeUsageBar.app/
 # macOS junk
 .DS_Store
 
-# Runtime log + auto-refresh cooldown stamp
+# Runtime log, auto-refresh cooldown stamp, empty cwd for the headless CLI
 updater.log
 .refresh-attempt
+.refresh-cwd/
+
+# Python bytecode (py_compile checks)
+__pycache__/
